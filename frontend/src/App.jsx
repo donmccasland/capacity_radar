@@ -18,8 +18,10 @@ import FolderIcon from '@mui/icons-material/Folder'
 import LinkIcon from '@mui/icons-material/Link'
 import MenuIcon from '@mui/icons-material/Menu'
 import ChevronLeftIcon from '@mui/icons-material/ChevronLeft'
+import SpeedIcon from '@mui/icons-material/Speed'
 import AdvisoryPanel from './components/AdvisoryPanel'
 import ScanningPanel from './components/ScanningPanel'
+import QuotaPanel from './components/QuotaPanel'
 
 const DRAWER_WIDTH = 290
 
@@ -574,6 +576,7 @@ export default function App() {
             >
               <Tab icon={<TipsAndUpdatesIcon sx={{ fontSize: 18 }} />} iconPosition="start" label="Capacity Advisory" sx={{ gap: 1 }} />
               <Tab icon={<RocketLaunchIcon sx={{ fontSize: 18 }} />} iconPosition="start" label="Scan & Deploy" sx={{ gap: 1 }} />
+              <Tab icon={<SpeedIcon sx={{ fontSize: 18 }} />} iconPosition="start" label="Quota" sx={{ gap: 1 }} />
             </Tabs>
           </Box>
 
@@ -619,6 +622,12 @@ export default function App() {
                   project={project}
                   userToken={userToken}
                   deployPreset={deployPreset}
+                />
+              </TabPanel>
+              <TabPanel value={tab} index={2}>
+                <QuotaPanel
+                  project={project}
+                  userToken={userToken}
                 />
               </TabPanel>
             </Container>

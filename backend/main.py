@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 
 from gpu_data import get_all_machine_types_info, get_zones_for_machine_type, MACHINE_TYPES, get_chip_groups, TPU_TYPES
 from advisory import get_calendar_advisory, get_spot_advisory, find_best_splits, get_flex_advisory
+from quotas import get_project_quotas
 from hunter import (
     create_session, cancel_session, get_session,
     active_sessions, ConsumptionModel, ScanningStatus,
@@ -340,6 +341,22 @@ async def list_zones_for_machine_type(machine_type: str):
         raise HTTPException(status_code=404, detail=f"Machine type '{machine_type}' not found")
     regions = sorted(set(z.rsplit("-", 1)[0] for z in zones))
     return {"machineType": machine_type, "zones": zones, "regions": regions}
+
+
+@app.get("/api/quotas")
+async def list_project_quotas(request: Request, project: str = "", refresh: bool = False):
+    """Get GPU & TPU quota catalog enriched with live project limits and usage."""
+    project = project.strip()
+    if not project:
+        return await get_project_quotas(project="", user_token=None, refresh=refresh)
+    user_token = _bearer_token(request)
+    _require_user_token(user_token)
+    try:
+        return await get_project_quotas(project=project, user_token=user_token, refresh=refresh)
+    except Exception as e:
+        logger.error(f"Quotas fetch error for project '{project}': {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 
 @app.get("/api/networks")
