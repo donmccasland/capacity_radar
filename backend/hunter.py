@@ -881,7 +881,7 @@ class ScanningSession:
                     if resp.status_code == 200:
                         data = resp.json()
                         status = data.get("status", {}).get("procurementStatus", "UNKNOWN")
-                        if status in ("APPROVED", "PROVISIONING", "FULFILLED"):
+                        if status in ("APPROVED", "PROCURING", "PROVISIONING", "FULFILLED"):
                             await self.emit("info",
                                 f"✅ Future reservation '{name}' APPROVED! Status: {status}")
                             return True
