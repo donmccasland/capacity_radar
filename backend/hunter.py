@@ -116,17 +116,44 @@ class ScanningSession:
         self.subnetwork = subnetwork or ""
         self._deploy_start_time = datetime.now(timezone.utc)
         self._quota_exhausted_zones: set[tuple[str, str]] = set()
+        self._tpu_zone_cache: dict[str, dict] = {}
 
-    def _mark_quota_exhausted(self, method: str, zone: str, err_msg: str = ""):
-        """Record that (method, zone) failed with a non-transient quota error."""
-        if "quota" not in err_msg.lower():
+    @staticmethod
+    def _method_key(method) -> str:
+        return method.value if isinstance(method, Enum) else str(method)
+
+    def _is_zone_exhausted(self, method, zone: str) -> bool:
+        return (self._method_key(method), zone) in self._quota_exhausted_zones
+
+    def _mark_quota_exhausted(self, method, zone: str, err_msg: str = "", status_code: int = 0):
+        """Record that (method, zone) failed with a non-transient error (quota, 400 invalid config,
+        unsupported machine family/accelerator, or 403 permission denied) so retries are not wasted."""
+        ml = err_msg.lower()
+        is_transient_capacity = ("no capacity" in ml or "out of stock" in ml or "stockout" in ml
+                                 or "does not have enough resources" in ml or "resource_exhausted" in ml)
+        if is_transient_capacity and "quota" not in ml:
             return
-        self._quota_exhausted_zones.add((str(method), zone))
-        region = zone.rsplit("-", 1)[0] if "-" in zone else ""
-        if region and ("region" in err_msg.lower() or "per_region" in err_msg.lower()):
-            for z in get_zones_for_machine_type(self.machine_type):
-                if z.startswith(f"{region}-"):
-                    self._quota_exhausted_zones.add((str(method), z))
+
+        permanent_keywords = (
+            "quota",
+            "not supported",
+            "unsupported",
+            "could not be found in the zonal accelerator configurations",
+            "invalid value",
+            "bad request",
+            "permission denied",
+            "not in this zone",
+            "billing",
+            "not found",
+        )
+        mkey = self._method_key(method)
+        if status_code in (400, 403, 404) or any(k in ml for k in permanent_keywords):
+            self._quota_exhausted_zones.add((mkey, zone))
+            region = zone.rsplit("-", 1)[0] if "-" in zone else ""
+            if region and ("region" in ml or "per_region" in ml):
+                for z in get_zones_for_machine_type(self.machine_type):
+                    if z.startswith(f"{region}-"):
+                        self._quota_exhausted_zones.add((mkey, z))
 
 
     def _tracking_labels(self, method: str) -> dict:
@@ -461,15 +488,15 @@ class ScanningSession:
             for attempt in range(1, max_retries + 1):
                 if self.cancelled or winner_event.is_set():
                     return False
-                remaining_zones = [z for z in zones if (str(method), z) not in self._quota_exhausted_zones]
+                remaining_zones = [z for z in zones if not self._is_zone_exhausted(method, z)]
                 if not remaining_zones:
                     await self.emit("warning",
-                        f"🛑 [{method_label}] All candidate zones exhausted due to insufficient quota — stopping retries.")
+                        f"🛑 [{method_label}] All candidate zones eliminated due to non-retryable errors (quota, unsupported config, or permissions) — stopping retries.")
                     break
                 for zone in remaining_zones:
                     if self.cancelled or winner_event.is_set():
                         return False
-                    if (str(method), zone) in self._quota_exhausted_zones:
+                    if self._is_zone_exhausted(method, zone):
                         continue
                     await self.emit("attempt",
                         f"🔄 [{method_label}] Attempt {attempt}/{max_retries} — {zone}",
@@ -495,10 +522,10 @@ class ScanningSession:
                         await self.emit("error", f"⚠️ [{method_label}] {zone}: {str(e)}")
 
                 if attempt < max_retries and not winner_event.is_set():
-                    remaining_after = [z for z in zones if (str(method), z) not in self._quota_exhausted_zones]
+                    remaining_after = [z for z in zones if not self._is_zone_exhausted(method, z)]
                     if not remaining_after:
                         await self.emit("warning",
-                            f"🛑 [{method_label}] All candidate zones exhausted due to insufficient quota — stopping retries.")
+                            f"🛑 [{method_label}] All candidate zones eliminated due to non-retryable errors (quota, unsupported config, or permissions) — stopping retries.")
                         break
                     await self.emit("waiting",
                         f"⏳ [{method_label}] Waiting {retry_interval}s ({attempt}/{max_retries})...")
@@ -536,15 +563,15 @@ class ScanningSession:
         for attempt in range(1, max_retries + 1):
             if self.cancelled:
                 return False
-            remaining_zones = [z for z in zones if (str(method), z) not in self._quota_exhausted_zones]
+            remaining_zones = [z for z in zones if not self._is_zone_exhausted(method, z)]
             if not remaining_zones:
                 await self.emit("warning",
-                    f"🛑 [{method_label}] All candidate zones exhausted due to insufficient quota — skipping remaining retry attempts.")
+                    f"🛑 [{method_label}] All candidate zones eliminated due to non-retryable errors (quota, unsupported config, or permissions) — skipping remaining retry attempts.")
                 return False
             for zone in remaining_zones:
                 if self.cancelled:
                     return False
-                if (str(method), zone) in self._quota_exhausted_zones:
+                if self._is_zone_exhausted(method, zone):
                     continue
                 await self.emit("attempt",
                     f"🔄 [{method_label}] Attempt {attempt}/{max_retries} — zone: {zone}",
@@ -560,10 +587,10 @@ class ScanningSession:
                         f"⚠️ [{method_label}] Error in {zone}: {str(e)}",
                         {"zone": zone, "error": str(e), "attempt": attempt})
             if attempt < max_retries:
-                remaining_after = [z for z in zones if (str(method), z) not in self._quota_exhausted_zones]
+                remaining_after = [z for z in zones if not self._is_zone_exhausted(method, z)]
                 if not remaining_after:
                     await self.emit("warning",
-                        f"🛑 [{method_label}] All candidate zones exhausted due to insufficient quota — skipping remaining retry attempts.")
+                        f"🛑 [{method_label}] All candidate zones eliminated due to non-retryable errors (quota, unsupported config, or permissions) — skipping remaining retry attempts.")
                     return False
                 await self.emit("waiting",
                     f"⏳ Waiting {retry_interval}s before next attempt ({attempt}/{max_retries})...")
@@ -1289,6 +1316,79 @@ class ScanningSession:
         tpu_info = TPU_TYPES.get(tpu_version, {})
         return tpu_info.get("runtime_version", "tpu-vm-tf-2.17.0-pjrt")
 
+    async def _verify_tpu_zone_support(self, token: str, zone: str,
+                                        accel_type: str, default_runtime: str) -> tuple[bool, str, str]:
+        """Pre-flight check against Cloud TPU v2 discovery endpoints for `zone`.
+
+        Verifies that:
+          1. `accel_type` (e.g., 'v6e-16', 'tpu7x-4') is enabled for `self.project` in `zone`.
+          2. `default_runtime` exists in `zone` (falling back to 'tpu-ubuntu2204-base' or 'v2-alpha' if not).
+
+        Results are cached per-zone on `self._tpu_zone_cache` so discovery runs at most once per zone.
+        """
+        if zone not in self._tpu_zone_cache:
+            headers = {"Authorization": f"Bearer {token}"}
+            acc_url = f"https://tpu.googleapis.com/v2/projects/{self.project}/locations/{zone}/acceleratorTypes"
+            rt_url = f"https://tpu.googleapis.com/v2/projects/{self.project}/locations/{zone}/runtimeVersions"
+            try:
+                async with httpx.AsyncClient(timeout=15) as client:
+                    acc_resp, rt_resp = await asyncio.gather(
+                        client.get(acc_url, headers=headers),
+                        client.get(rt_url, headers=headers),
+                        return_exceptions=True,
+                    )
+                if isinstance(acc_resp, Exception) or acc_resp.status_code != 200:
+                    # If discovery endpoint fails transiently, don't block the attempt
+                    return True, default_runtime, ""
+                accels = {a.get("type", "") for a in acc_resp.json().get("acceleratorTypes", []) if a.get("type")}
+                prefixes = sorted({a.split("-")[0] for a in accels if a})
+                runtimes = set()
+                if not isinstance(rt_resp, Exception) and rt_resp.status_code == 200:
+                    runtimes = {r.get("version", "") for r in rt_resp.json().get("runtimeVersions", []) if r.get("version")}
+                self._tpu_zone_cache[zone] = {
+                    "accels": accels,
+                    "prefixes": prefixes,
+                    "runtimes": runtimes,
+                }
+            except Exception:
+                return True, default_runtime, ""
+
+        info = self._tpu_zone_cache[zone]
+        accels = info["accels"]
+        prefixes = info["prefixes"]
+        runtimes = info["runtimes"]
+
+        if accel_type not in accels:
+            req_prefix = accel_type.split("-")[0]
+            same_family = sorted(
+                [a for a in accels if a.startswith(f"{req_prefix}-")],
+                key=lambda x: int(x.split("-")[1]) if len(x.split("-")) > 1 and x.split("-")[1].isdigit() else 999999
+            )
+            if same_family:
+                reason = (
+                    f"Accelerator topology '{accel_type}' is not available in {zone} for project '{self.project}' "
+                    f"(supported {req_prefix} topologies in {zone}: {', '.join(same_family[:8])})."
+                )
+            elif prefixes:
+                reason = (
+                    f"Project '{self.project}' does not have '{accel_type}' ({req_prefix}) enabled in {zone} "
+                    f"(available TPU families in {zone} for this project: {', '.join(prefixes)})."
+                )
+            else:
+                reason = f"Project '{self.project}' has no Cloud TPU accelerator types enabled in {zone}."
+            for m in (ConsumptionModel.ON_DEMAND, ConsumptionModel.DWS_FLEX, ConsumptionModel.SPOT):
+                self._quota_exhausted_zones.add((self._method_key(m), zone))
+            return False, default_runtime, reason
+
+        resolved_runtime = default_runtime
+        if runtimes and default_runtime not in runtimes:
+            for candidate in ("tpu-ubuntu2204-base", "v2-alpha", "tpu-vm-tf-2.17.1-pjrt", "tpu-vm-tf-2.17.0-pjrt"):
+                if candidate in runtimes:
+                    resolved_runtime = candidate
+                    break
+
+        return True, resolved_runtime, ""
+
     async def _poll_tpu_operation(self, op_name: str, zone: str, label: str,
                                    max_polls: int = 60, poll_interval: int = 10) -> bool:
         """Poll a TPU operation until done."""
@@ -1327,6 +1427,12 @@ class ScanningSession:
         accel_type = self._get_tpu_accelerator_type(zone)
         runtime_version = self._get_tpu_runtime_version()
 
+        ok, runtime_version, reason = await self._verify_tpu_zone_support(
+            token, zone, accel_type, runtime_version)
+        if not ok:
+            await self.emit("warning", f"🛑 [TPU On-Demand] {zone}: {reason}")
+            return False
+
         await self.emit("action",
             f"📡 [TPU] Creating on-demand TPU node '{node_name}' ({accel_type}, runtime: {runtime_version}) in {zone}...")
 
@@ -1361,7 +1467,7 @@ class ScanningSession:
                         return False
                 else:
                     err_msg = self._parse_api_error(data)
-                    self._mark_quota_exhausted(ConsumptionModel.ON_DEMAND, zone, err_msg)
+                    self._mark_quota_exhausted(ConsumptionModel.ON_DEMAND, zone, err_msg, resp.status_code)
                     await self.emit("warning",
                         f"⚠️ TPU On-Demand failed in {zone}: {err_msg}")
                     return False
@@ -1418,6 +1524,13 @@ class ScanningSession:
         token = await self._get_token()
         accel_type = self._get_tpu_accelerator_type(zone)
         runtime_version = self._get_tpu_runtime_version()
+
+        ok, runtime_version, reason = await self._verify_tpu_zone_support(
+            token, zone, accel_type, runtime_version)
+        if not ok:
+            await self.emit("warning", f"🛑 [TPU Flex] {zone}: {reason}")
+            return False
+
         net_cfg = await self._get_tpu_network_config(token, zone)
 
         wait_secs = flex_max_wait_hours * 3600
@@ -1469,7 +1582,7 @@ class ScanningSession:
                         return False
                 else:
                     err_msg = self._parse_api_error(data)
-                    self._mark_quota_exhausted(ConsumptionModel.DWS_FLEX, zone, err_msg)
+                    self._mark_quota_exhausted(ConsumptionModel.DWS_FLEX, zone, err_msg, resp.status_code)
                     await self.emit("warning",
                         f"⚠️ TPU Queued Resource failed in {zone}: {err_msg}")
                     return False
@@ -1490,8 +1603,9 @@ class ScanningSession:
         tpu_version = self._get_tpu_version()
         vm_family = TPU_CALENDAR_VM_FAMILY.get(tpu_version)
         if not vm_family:
+            self._quota_exhausted_zones.add((self._method_key(ConsumptionModel.DWS_CALENDAR), zone))
             await self.emit("warning",
-                f"⚠️ TPU DWS Calendar Mode is not supported for TPU {tpu_version} "
+                f"🛑 TPU DWS Calendar Mode is not supported for TPU {tpu_version} "
                 f"(supported generations: {', '.join(TPU_CALENDAR_VM_FAMILY.keys())}).")
             return False
 
@@ -1593,7 +1707,7 @@ class ScanningSession:
                     return False
                 else:
                     err_msg = self._parse_api_error(data)
-                    self._mark_quota_exhausted(ConsumptionModel.DWS_CALENDAR, zone, err_msg)
+                    self._mark_quota_exhausted(ConsumptionModel.DWS_CALENDAR, zone, err_msg, resp.status_code)
                     await self.emit("warning",
                         f"⚠️ TPU Calendar failed in {zone}: {err_msg}")
                     return False
@@ -1607,6 +1721,13 @@ class ScanningSession:
         token = await self._get_token()
         accel_type = self._get_tpu_accelerator_type(zone)
         runtime_version = self._get_tpu_runtime_version()
+
+        ok, runtime_version, reason = await self._verify_tpu_zone_support(
+            token, zone, accel_type, runtime_version)
+        if not ok:
+            await self.emit("warning", f"🛑 [TPU Spot] {zone}: {reason}")
+            return False
+
         net_cfg = await self._get_tpu_network_config(token, zone)
 
         await self.emit("action",
@@ -1652,7 +1773,7 @@ class ScanningSession:
                         return False
                 else:
                     err_msg = self._parse_api_error(data)
-                    self._mark_quota_exhausted(ConsumptionModel.SPOT, zone, err_msg)
+                    self._mark_quota_exhausted(ConsumptionModel.SPOT, zone, err_msg, resp.status_code)
                     await self.emit("warning",
                         f"⚠️ Spot TPU failed in {zone}: {err_msg}")
                     return False

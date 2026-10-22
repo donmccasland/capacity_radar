@@ -816,21 +816,35 @@ async def get_flex_advisory(
         tpu_gen = next((k for k, v in TPU_TYPES.items() if machine_type in v.get("machine_types", {})), "")
         tpu_info = TPU_TYPES.get(tpu_gen, {})
         zones_list = tpu_info.get("zones", [])
+        flex_zones = tpu_info.get("dws_flex_zones", zones_list)
         supported = tpu_info.get("supported", {})
         results["tpuInfo"] = {
             "type": tpu_gen,
             "name": tpu_info.get("gpu", f"Cloud TPU {tpu_gen}"),
             "machineType": machine_type,
-            "zones": zones_list,
-            "regions": sorted(set(z.rsplit("-", 1)[0] for z in zones_list)),
+            "zones": flex_zones if supported.get("dws_flex") else zones_list,
+            "regions": sorted(set(z.rsplit("-", 1)[0] for z in (flex_zones if supported.get("dws_flex") else zones_list))),
             "topologies": tpu_info.get("topologies", []),
             "supported": supported,
             "specs": tpu_info.get("machine_types", {}).get(machine_type, {}),
         }
+        if supported.get("dws_flex"):
+            for z in flex_zones:
+                results["recommendations"].append({
+                    "region": z.rsplit("-", 1)[0],
+                    "zone": z,
+                    "machineType": machine_type,
+                    "instanceCount": size,
+                    "availability": "SUPPORTED",
+                    "estimatedWait": "Use Scan & Deploy (Queued Resource)",
+                    "provisioningModel": "FLEX_START",
+                    "source": "TPU DWS Flex Pool Configuration",
+                })
         results["message"] = (
             f"The Flex Start Capacity Advisory API does not support TPU machine types. "
             f"DWS Flex Start {'is' if supported.get('dws_flex') else 'is NOT'} supported for "
-            f"{tpu_info.get('gpu', tpu_gen)} — for TPUs use the Scan & Deploy tab (Queued Resources)."
+            f"{tpu_info.get('gpu', tpu_gen)} in {', '.join(flex_zones) if supported.get('dws_flex') else 'any zone'} — "
+            f"use the Scan & Deploy tab (Queued Resources) to provision."
         )
         return results
 

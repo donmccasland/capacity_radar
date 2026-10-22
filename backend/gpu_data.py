@@ -479,9 +479,10 @@ CONSUMPTION_SUPPORT = {
     },
 }
 
-# Compute Engine VM family enums used by Calendar Mode Advisory & Future Reservations
+# Compute Engine VM family enums used by Calendar Mode Advisory & Future Reservations.
+# Note: TPU v7x (VM_FAMILY_CLOUD_TPU_POD_SLICE_TPU7X) is currently rejected by GCE's
+# calendarmode/validation.go and futureReservations until v7x becomes self-service.
 TPU_CALENDAR_VM_FAMILY = {
-    "v7x": "VM_FAMILY_CLOUD_TPU_POD_SLICE_TPU7X",
     "v6e": "VM_FAMILY_CLOUD_TPU_LITE_POD_SLICE_CT6E",
     "v5p": "VM_FAMILY_CLOUD_TPU_POD_SLICE_CT5P",
     "v5e": "VM_FAMILY_CLOUD_TPU_LITE_POD_SLICE_CT5LP",
@@ -493,14 +494,14 @@ TPU_TYPES = {
         "gpu": "Cloud TPU v7x (Ironwood)",
         "accelerator_prefix": "tpu7x",
         "runtime_version": "v2-alpha-tpuv7x",
-        "zones": ["us-central1-a", "us-central1-b", "us-central1-c",
-                  "us-east5-a", "us-east5-b"],
+        "zones": ["us-central1-b", "us-central1-c", "us-east1-b",
+                  "us-east5-a", "us-west8-a"],
         "machine_types": {
-            "tpu7x-standard-1t": {"chips": 1, "vcpus": 48, "memory_gb": 192, "hbm_gb": 192},
             "tpu7x-standard-4t": {"chips": 4, "vcpus": 192, "memory_gb": 768, "hbm_gb": 768},
         },
-        "topologies": ["1x1x1", "2x2x1", "2x2x2", "2x2x4", "4x4x4"],
-        "supported": {"on_demand": True, "spot": True, "dws_calendar": True, "dws_flex": True},
+        "topologies": ["2x2x1", "2x2x2", "2x2x4", "4x4x4"],
+        "supported": {"on_demand": True, "spot": True, "dws_calendar": False, "dws_flex": True},
+        "advisory_supported": {"dws_calendar": False, "spot": False, "dws_flex": False},
     },
     "v6e": {
         "gpu": "Cloud TPU v6e (Trillium)",
@@ -518,6 +519,7 @@ TPU_TYPES = {
         },
         "topologies": ["1x1", "2x2", "2x4", "4x4", "4x8", "8x8", "8x16", "16x16"],
         "supported": {"on_demand": True, "spot": True, "dws_calendar": True, "dws_flex": True},
+        "advisory_supported": {"dws_calendar": True, "spot": False, "dws_flex": False},
     },
     "v5p": {
         "gpu": "Cloud TPU v5p (Viperfish)",
@@ -531,6 +533,7 @@ TPU_TYPES = {
         },
         "topologies": ["2x2x1", "2x2x2", "2x2x4", "2x4x4", "4x4x4"],
         "supported": {"on_demand": True, "spot": True, "dws_calendar": True, "dws_flex": True},
+        "advisory_supported": {"dws_calendar": True, "spot": False, "dws_flex": False},
     },
     "v5e": {
         "gpu": "Cloud TPU v5e (Viperlite)",
@@ -545,6 +548,7 @@ TPU_TYPES = {
         },
         "topologies": ["1x1", "2x2", "2x4", "4x4", "4x8", "8x8", "8x16", "16x16"],
         "supported": {"on_demand": True, "spot": True, "dws_calendar": True, "dws_flex": True},
+        "advisory_supported": {"dws_calendar": True, "spot": False, "dws_flex": False},
     },
     "v4": {
         "gpu": "Cloud TPU v4 (Pufferfish)",
@@ -556,6 +560,7 @@ TPU_TYPES = {
         },
         "topologies": ["2x2x1", "2x2x2", "2x2x4", "2x4x4", "4x4x4"],
         "supported": {"on_demand": True, "spot": True, "dws_calendar": False, "dws_flex": True},
+        "advisory_supported": {"dws_calendar": False, "spot": False, "dws_flex": False},
     },
     "v3": {
         "gpu": "Cloud TPU v3 (Dragonfish)",
@@ -567,6 +572,7 @@ TPU_TYPES = {
         },
         "topologies": ["2x2", "4x4", "4x8", "8x8"],
         "supported": {"on_demand": True, "spot": True, "dws_calendar": False, "dws_flex": False},
+        "advisory_supported": {"dws_calendar": False, "spot": False, "dws_flex": False},
     },
     "v2": {
         "gpu": "Cloud TPU v2 (Jellyfish)",
@@ -579,6 +585,7 @@ TPU_TYPES = {
         },
         "topologies": ["2x2", "4x4", "4x8", "8x8"],
         "supported": {"on_demand": True, "spot": True, "dws_calendar": False, "dws_flex": False},
+        "advisory_supported": {"dws_calendar": False, "spot": False, "dws_flex": False},
     },
 }
 
@@ -635,11 +642,21 @@ def get_all_machine_types_info() -> list[dict]:
                 "spot": is_consumption_supported(mt, "spot"),
                 "dws_calendar": is_consumption_supported(mt, "dws_calendar"),
                 "dws_flex": is_consumption_supported(mt, "dws_flex"),
-            }
+            },
+            "advisorySupported": {
+                "dws_calendar": is_consumption_supported(mt, "dws_calendar"),
+                "spot": is_consumption_supported(mt, "spot") and family != "A4X Max",
+                "dws_flex": is_consumption_supported(mt, "dws_flex") and family != "A4X Max",
+            },
         })
     # Add TPU entries from machine_types
     for tpu_type, tpu_info in TPU_TYPES.items():
         supported = tpu_info.get("supported", {})
+        advisory_supported = tpu_info.get("advisory_supported", {
+            "dws_calendar": tpu_type in TPU_CALENDAR_VM_FAMILY,
+            "spot": False,
+            "dws_flex": False,
+        })
         for mt_name, mt_spec in tpu_info.get("machine_types", {}).items():
             result.append({
                 "machineType": mt_name,
@@ -649,12 +666,14 @@ def get_all_machine_types_info() -> list[dict]:
                 "family": f"TPU {tpu_type}",
                 "category": "TPU",
                 "zones": tpu_info["zones"],
+                "dwsFlexZones": tpu_info.get("dws_flex_zones", tpu_info["zones"]),
                 "regions": sorted(set(z.rsplit("-", 1)[0] for z in tpu_info["zones"])),
                 "vcpus": mt_spec.get("vcpus"),
                 "memoryGb": mt_spec.get("memory_gb"),
                 "hbmGb": mt_spec.get("hbm_gb"),
                 "topologies": tpu_info.get("topologies", []),
                 "supported": supported,
+                "advisorySupported": advisory_supported,
             })
     return result
 

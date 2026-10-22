@@ -202,8 +202,15 @@ export default function AdvisoryPanel({ machineTypes = [], loading: mtLoading, p
     }
   }
 
-  const supportsCalendar = selectedMachineInfo?.supported?.dws_calendar
-  const supportsFlex = selectedMachineInfo?.supported?.dws_flex
+  const supportsCalendar = selectedMachineInfo?.advisorySupported
+    ? selectedMachineInfo.advisorySupported.dws_calendar
+    : selectedMachineInfo?.supported?.dws_calendar
+  const supportsSpot = selectedMachineInfo?.advisorySupported
+    ? selectedMachineInfo.advisorySupported.spot
+    : selectedMachineInfo?.supported?.spot !== false
+  const supportsFlex = selectedMachineInfo?.advisorySupported
+    ? selectedMachineInfo.advisorySupported.dws_flex
+    : selectedMachineInfo?.supported?.dws_flex
   const canQuery = machineType && project
   const anyLoading = calendarLoading || splitsLoading
 
@@ -284,10 +291,30 @@ export default function AdvisoryPanel({ machineTypes = [], loading: mtLoading, p
           </Grid>
           {selectedMachineInfo && (
             <Grid item xs={12} md={7}>
-              <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', alignItems: 'center' }}>
-                <Typography variant="body2" color="text.secondary" sx={{ mr: 0.5 }}>Supported:</Typography>
+              <Box sx={{ display: 'flex', gap: 0.75, flexWrap: 'wrap', alignItems: 'center' }}>
+                <Typography variant="body2" color="text.secondary" sx={{ mr: 0.5 }}>Advisory APIs:</Typography>
+                {Object.entries(selectedMachineInfo.advisorySupported || {
+                  dws_calendar: supportsCalendar,
+                  spot: supportsSpot,
+                  dws_flex: supportsFlex,
+                })
+                  .filter(([, supported]) => showUnsupported || supported)
+                  .map(([key, supported]) => {
+                    const labels = { dws_calendar: 'DWS Calendar Advisory', spot: 'Spot Advisory', dws_flex: 'DWS Flex Advisory' }
+                    return (
+                      <Chip key={`adv-${key}`} label={labels[key]} size="small"
+                        color={supported ? 'primary' : 'default'}
+                        variant={supported ? 'filled' : 'outlined'}
+                        sx={{ height: 22, fontSize: '0.65rem', ...(supported ? {} : { opacity: 0.4, textDecoration: 'line-through' }) }}
+                      />
+                    )
+                  })}
+                {!supportsCalendar && !supportsSpot && !supportsFlex && !showUnsupported && (
+                  <Chip label="None (Use Scan & Deploy)" size="small" variant="outlined" sx={{ height: 22, fontSize: '0.65rem' }} />
+                )}
+                <Typography variant="body2" color="text.secondary" sx={{ ml: 0.5, mr: 0.5 }}>| Scan & Deploy:</Typography>
                 {Object.entries(selectedMachineInfo.supported)
-                  .filter(([key, supported]) => showUnsupported || supported)
+                  .filter(([, supported]) => showUnsupported || supported)
                   .map(([key, supported]) => {
                     const labels = { on_demand: 'On-Demand', spot: 'Spot', dws_calendar: 'DWS Calendar', dws_flex: 'DWS Flex' }
                     return (
@@ -307,6 +334,16 @@ export default function AdvisoryPanel({ machineTypes = [], loading: mtLoading, p
         </Grid>
       </Paper>
 
+      {/* Advisory info banner when no live Advisory API is supported for the selected chip */}
+      {machineType && !supportsCalendar && !supportsSpot && !supportsFlex && !showUnsupported && (
+        <Alert severity="info" sx={{ mb: 3 }}>
+          <AlertTitle>No Live Capacity Advisory API for {selectedMachineInfo?.gpu || machineType}</AlertTitle>
+          Google Cloud's Capacity Advisory APIs (<code>advice/calendarMode</code> and <code>advice/capacity</code>) do not currently support{' '}
+          <strong>{machineType}</strong>. To provision <strong>{selectedMachineInfo?.gpu || machineType}</strong> across its supported zones (
+          {availableZones.join(', ')}), use the <strong>Scan &amp; Deploy</strong> tab, or toggle <em>"Showing only supported methods &amp; zones"</em> above to inspect static zone configuration details.
+        </Alert>
+      )}
+
       {/* Two advisory sections side by side */}
       <Grid container spacing={3}>
         {/* Calendar Advisory */}
@@ -316,15 +353,15 @@ export default function AdvisoryPanel({ machineTypes = [], loading: mtLoading, p
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 2 }}>
               <CalendarMonthIcon sx={{ color: '#1a73e8', fontSize: 22 }} />
               <Typography variant="h4">DWS Calendar Advisory</Typography>
-              <Tooltip title="Shows recommended zones and time windows for DWS Calendar mode reservations. Supported for A3, A4, and TPU families.">
+              <Tooltip title="Shows recommended zones and time windows for DWS Calendar mode reservations. Supported for A3, A4, and TPU v6e/v5p/v5e families.">
                 <InfoOutlinedIcon sx={{ fontSize: 16, color: '#80868b', cursor: 'help' }} />
               </Tooltip>
               {anyLoading && <CircularProgress size={18} sx={{ ml: 'auto' }} />}
             </Box>
 
-            {!selectedMachineInfo?.supported?.dws_calendar && machineType && (
+            {!supportsCalendar && machineType && (
               <Alert severity="info" sx={{ mb: 2 }}>
-                DWS Calendar mode is not supported for {machineType}. Only available for A4, A3, and TPU types.
+                DWS Calendar Advisory API is not supported for {machineType}. Supported for GPU A4/A3 families and Cloud TPU v6e, v5p, and v5e.
               </Alert>
             )}
 
@@ -510,17 +547,23 @@ export default function AdvisoryPanel({ machineTypes = [], loading: mtLoading, p
         )}
 
         {/* Spot Advisory */}
-        {(showUnsupported || !machineType || selectedMachineInfo?.supported?.spot !== false) && (
+        {(showUnsupported || !machineType || supportsSpot) && (
         <Grid item xs={12} lg={6}>
           <Paper sx={{ p: 3, height: '100%' }}>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 2 }}>
               <BoltIcon sx={{ color: '#f9ab00', fontSize: 22 }} />
               <Typography variant="h4">Spot VM Advisory</Typography>
-              <Tooltip title="Shows spot VM availability and preemption risk by zone. Works for all VM types.">
+              <Tooltip title="Shows spot VM availability and preemption risk by zone. Supported for Compute Engine GPU VMs (not supported by GCP Advisory API for TPUs).">
                 <InfoOutlinedIcon sx={{ fontSize: 16, color: '#80868b', cursor: 'help' }} />
               </Tooltip>
               {spotLoading && <CircularProgress size={18} sx={{ ml: 'auto' }} />}
             </Box>
+
+            {!supportsSpot && machineType && (
+              <Alert severity="info" sx={{ mb: 2 }}>
+                Google Cloud's Spot Capacity Advisory API does not support {machineType} ({selectedMachineInfo?.category === 'TPU' ? 'TPUs use Scan & Deploy Queued Resources for Spot' : 'unsupported series'}).
+              </Alert>
+            )}
 
             <Box sx={{ bgcolor: '#fef7e0', borderRadius: 2, p: 2, mb: 2 }}>
               <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
@@ -608,7 +651,11 @@ export default function AdvisoryPanel({ machineTypes = [], loading: mtLoading, p
 
             {!supportsFlex && machineType && (
               <Alert severity="info" sx={{ mb: 2 }}>
-                DWS Flex Start is not supported for {machineType}.
+                Google Cloud's DWS Flex Start Advisory API does not support {machineType}.
+                {selectedMachineInfo?.category === 'TPU' && selectedMachineInfo?.supported?.dws_flex && (
+                  <> However, <strong>DWS Flex Start provisioning IS supported</strong> for {selectedMachineInfo.gpu} in{' '}
+                  <strong>{(selectedMachineInfo.dwsFlexZones || availableZones).join(', ')}</strong> via the <strong>Scan &amp; Deploy</strong> tab.</>
+                )}
               </Alert>
             )}
 
@@ -817,7 +864,7 @@ function ErrorsCollapse({ errors, show, setShow }) {
 
 function AvailabilityChip({ availability }) {
   const avail = (availability || '').toUpperCase()
-  if (avail.includes('HIGH') || avail === 'AVAILABLE') return <Chip label={availability} size="small" color="success" sx={{ height: 22, fontSize: '0.65rem' }} />
+  if (avail.includes('HIGH') || avail === 'AVAILABLE' || avail === 'SUPPORTED') return <Chip label={availability} size="small" color="success" sx={{ height: 22, fontSize: '0.65rem' }} />
   if (avail.includes('MEDIUM') || avail.includes('MODERATE')) return <Chip label={availability} size="small" color="warning" sx={{ height: 22, fontSize: '0.65rem' }} />
   if (avail.includes('LOW') || avail === 'UNAVAILABLE') return <Chip label={availability} size="small" color="error" sx={{ height: 22, fontSize: '0.65rem' }} />
   return <Chip label={availability || 'UNKNOWN'} size="small" sx={{ height: 22, fontSize: '0.65rem' }} />
