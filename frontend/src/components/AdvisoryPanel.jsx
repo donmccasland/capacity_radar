@@ -631,7 +631,34 @@ export default function AdvisoryPanel({ machineTypes = [], loading: mtLoading, p
             </Box>
 
             {!supportsSpot && machineType && (
-              <Alert severity="info" sx={{ mb: 2 }}>
+              <Alert
+                severity="info"
+                sx={{ mb: 2 }}
+                action={
+                  selectedMachineInfo?.supported?.spot && onDeployRecommendation ? (
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      color="warning"
+                      startIcon={<RocketLaunchIcon sx={{ fontSize: 13 }} />}
+                      onClick={() =>
+                        onDeployRecommendation({
+                          category,
+                          chip,
+                          machineType,
+                          vmCount,
+                          method: 'spot',
+                          zones: selectedZones.length > 0 ? selectedZones : availableZones,
+                          sourceLabel: 'Spot VM Advisory',
+                        })
+                      }
+                      sx={{ textTransform: 'none', fontSize: '0.72rem', whiteSpace: 'nowrap', bgcolor: '#fff' }}
+                    >
+                      Deploy Spot
+                    </Button>
+                  ) : null
+                }
+              >
                 Google Cloud's Spot Capacity Advisory API does not support {machineType} ({selectedMachineInfo?.category === 'TPU' ? 'TPUs use Scan & Deploy Queued Resources for Spot' : 'unsupported series'}).
               </Alert>
             )}
@@ -663,30 +690,103 @@ export default function AdvisoryPanel({ machineTypes = [], loading: mtLoading, p
                 {spotResults.tpuInfo && (
                   <TpuInfoAlert info={spotResults.tpuInfo} message={spotResults.message} />
                 )}
-                {(spotResults.recommendations || []).length > 0 ? (
-                  <TableContainer>
-                    <Table size="small">
-                      <TableHead>
-                        <TableRow>
-                          <TableCell>Region</TableCell>
-                          <TableCell>Zone</TableCell>
-                          <TableCell>Availability</TableCell>
-                          <TableCell>Preemption Risk</TableCell>
-                        </TableRow>
-                      </TableHead>
-                      <TableBody>
-                        {(spotResults.recommendations || []).map((rec, idx) => (
-                          <TableRow key={idx} hover>
-                            <TableCell>{rec.region}</TableCell>
-                            <TableCell sx={{ fontWeight: 500 }}>{rec.zone}</TableCell>
-                            <TableCell><AvailabilityChip availability={rec.spotAvailability} /></TableCell>
-                            <TableCell><PreemptionChip rate={rec.preemptionRate} /></TableCell>
-                          </TableRow>
-                        ))}
-                      </TableBody>
-                    </Table>
-                  </TableContainer>
-                ) : (
+                {(spotResults.recommendations || []).length > 0 ? (() => {
+                  const sortedSpotRecs = [...(spotResults.recommendations || [])].sort((a, b) => {
+                    const rank = (val) => {
+                      const u = (val || '').toUpperCase()
+                      if (u.includes('HIGH') || u === 'AVAILABLE' || u === 'SUPPORTED') return 0
+                      if (u.includes('MEDIUM') || u.includes('MODERATE')) return 1
+                      if (u.includes('LOW')) return 2
+                      return 3
+                    }
+                    return rank(a.spotAvailability) - rank(b.spotAvailability)
+                  })
+                  const deployableSpotRecs = sortedSpotRecs.filter(r => {
+                    const u = (r.spotAvailability || '').toUpperCase()
+                    return u && u !== 'UNAVAILABLE' && u !== 'NONE' && u !== 'UNSUPPORTED'
+                  })
+                  return (
+                    <>
+                      {deployableSpotRecs.length > 1 && onDeployRecommendation && (
+                        <Box sx={{ display: 'flex', justifyContent: 'flex-end', mb: 1 }}>
+                          <Button
+                            size="small"
+                            variant="contained"
+                            color="warning"
+                            startIcon={<RocketLaunchIcon sx={{ fontSize: 15 }} />}
+                            onClick={() =>
+                              onDeployRecommendation({
+                                category,
+                                chip,
+                                machineType,
+                                vmCount,
+                                method: 'spot',
+                                zones: deployableSpotRecs.map(r => r.zone),
+                                sourceLabel: 'Spot VM Advisory',
+                              })
+                            }
+                            sx={{ textTransform: 'none', fontSize: '0.75rem', bgcolor: '#f9ab00', '&:hover': { bgcolor: '#e69500' } }}
+                          >
+                            Scan All {deployableSpotRecs.length} Spot Zones
+                          </Button>
+                        </Box>
+                      )}
+                      <TableContainer>
+                        <Table size="small">
+                          <TableHead>
+                            <TableRow>
+                              <TableCell>Region</TableCell>
+                              <TableCell>Zone</TableCell>
+                              <TableCell>Availability</TableCell>
+                              <TableCell>Preemption Risk</TableCell>
+                              <TableCell align="right">Action</TableCell>
+                            </TableRow>
+                          </TableHead>
+                          <TableBody>
+                            {sortedSpotRecs.map((rec, idx) => {
+                              const availUpper = (rec.spotAvailability || '').toUpperCase()
+                              const isGood = availUpper.includes('HIGH') || availUpper === 'AVAILABLE' || availUpper === 'SUPPORTED'
+                              return (
+                                <TableRow key={idx} hover sx={isGood ? { bgcolor: '#fef7e0' } : {}}>
+                                  <TableCell>{rec.region}</TableCell>
+                                  <TableCell sx={{ fontWeight: 500 }}>{rec.zone}</TableCell>
+                                  <TableCell><AvailabilityChip availability={rec.spotAvailability} /></TableCell>
+                                  <TableCell><PreemptionChip rate={rec.preemptionRate} /></TableCell>
+                                  <TableCell align="right">
+                                    {onDeployRecommendation && availUpper !== 'UNAVAILABLE' && (
+                                      <Tooltip title={`Pre-fill Scan & Deploy with Spot VM in ${rec.zone}`}>
+                                        <Button
+                                          size="small"
+                                          variant="outlined"
+                                          color="warning"
+                                          startIcon={<RocketLaunchIcon sx={{ fontSize: 13 }} />}
+                                          onClick={() =>
+                                            onDeployRecommendation({
+                                              category,
+                                              chip,
+                                              machineType,
+                                              vmCount,
+                                              method: 'spot',
+                                              zones: [rec.zone],
+                                              sourceLabel: 'Spot VM Advisory',
+                                            })
+                                          }
+                                          sx={{ py: 0.2, px: 1, fontSize: '0.68rem', textTransform: 'none', bgcolor: '#fff' }}
+                                        >
+                                          Deploy
+                                        </Button>
+                                      </Tooltip>
+                                    )}
+                                  </TableCell>
+                                </TableRow>
+                              )
+                            })}
+                          </TableBody>
+                        </Table>
+                      </TableContainer>
+                    </>
+                  )
+                })() : (
                   <Alert severity="warning">No spot advisory recommendations found.</Alert>
                 )}
                 <ErrorsCollapse errors={spotResults.errors}
@@ -721,7 +821,41 @@ export default function AdvisoryPanel({ machineTypes = [], loading: mtLoading, p
             </Box>
 
             {!supportsFlex && machineType && (
-              <Alert severity="info" sx={{ mb: 2 }}>
+              <Alert
+                severity="info"
+                sx={{ mb: 2 }}
+                action={
+                  selectedMachineInfo?.supported?.dws_flex && onDeployRecommendation ? (
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      startIcon={<RocketLaunchIcon sx={{ fontSize: 13 }} />}
+                      onClick={() =>
+                        onDeployRecommendation({
+                          category,
+                          chip,
+                          machineType,
+                          vmCount: flexSize || vmCount,
+                          method: 'dws_flex',
+                          zones: selectedMachineInfo.dwsFlexZones || (selectedZones.length > 0 ? selectedZones : availableZones),
+                          flexUsageDurationHours: flexMaxRunHours,
+                          sourceLabel: 'DWS Flex Start Advisory',
+                        })
+                      }
+                      sx={{
+                        textTransform: 'none',
+                        fontSize: '0.72rem',
+                        whiteSpace: 'nowrap',
+                        bgcolor: '#fff',
+                        color: '#9334e6',
+                        borderColor: '#9334e6',
+                      }}
+                    >
+                      Deploy Flex
+                    </Button>
+                  ) : null
+                }
+              >
                 Google Cloud's DWS Flex Start Advisory API does not support {machineType}.
                 {selectedMachineInfo?.category === 'TPU' && selectedMachineInfo?.supported?.dws_flex && (
                   <> However, <strong>DWS Flex Start provisioning IS supported</strong> for {selectedMachineInfo.gpu} in{' '}
@@ -769,36 +903,102 @@ export default function AdvisoryPanel({ machineTypes = [], loading: mtLoading, p
                 {flexResults.tpuInfo && (
                   <TpuInfoAlert info={flexResults.tpuInfo} message={flexResults.message} />
                 )}
-                {(flexResults.recommendations || []).length > 0 ? (
-                  <TableContainer>
-                    <Table size="small">
-                      <TableHead>
-                        <TableRow>
-                          <TableCell>Zone</TableCell>
-                          <TableCell>Instances</TableCell>
-                          <TableCell>Availability</TableCell>
-                          <TableCell>Est. Wait</TableCell>
-                        </TableRow>
-                      </TableHead>
-                      <TableBody>
-                        {(flexResults.recommendations || [])
-                          .sort((a, b) => {
-                            const order = { HIGH: 0, MODERATE: 1, LOW: 2, NONE: 3, UNKNOWN: 4 }
-                            return (order[a.availability] ?? 5) - (order[b.availability] ?? 5)
-                          })
-                          .map((rec, idx) => (
-                          <TableRow key={idx} hover
-                            sx={rec.availability === 'HIGH' ? { bgcolor: '#e6f4ea' } : {}}>
-                            <TableCell sx={{ fontWeight: 500 }}>{rec.zone}</TableCell>
-                            <TableCell>{rec.instanceCount ?? '—'}</TableCell>
-                            <TableCell><AvailabilityChip availability={rec.availability} /></TableCell>
-                            <TableCell sx={{ fontSize: '0.75rem', color: '#5f6368' }}>{rec.estimatedWait || '—'}</TableCell>
-                          </TableRow>
-                        ))}
-                      </TableBody>
-                    </Table>
-                  </TableContainer>
-                ) : (
+                {(flexResults.recommendations || []).length > 0 ? (() => {
+                  const sortedFlexRecs = [...(flexResults.recommendations || [])].sort((a, b) => {
+                    const order = { HIGH: 0, MODERATE: 1, LOW: 2, NONE: 3, UNKNOWN: 4 }
+                    return (order[a.availability] ?? 5) - (order[b.availability] ?? 5)
+                  })
+                  const deployableFlexRecs = sortedFlexRecs.filter(r => {
+                    const u = (r.availability || '').toUpperCase()
+                    return u && u !== 'NONE' && u !== 'UNAVAILABLE'
+                  })
+                  return (
+                    <>
+                      {deployableFlexRecs.length > 1 && onDeployRecommendation && (
+                        <Box sx={{ display: 'flex', justifyContent: 'flex-end', mb: 1 }}>
+                          <Button
+                            size="small"
+                            variant="contained"
+                            startIcon={<RocketLaunchIcon sx={{ fontSize: 15 }} />}
+                            onClick={() =>
+                              onDeployRecommendation({
+                                category,
+                                chip,
+                                machineType,
+                                vmCount: flexSize,
+                                method: 'dws_flex',
+                                zones: deployableFlexRecs.map(r => r.zone),
+                                flexUsageDurationHours: flexMaxRunHours,
+                                sourceLabel: 'DWS Flex Start Advisory',
+                              })
+                            }
+                            sx={{ textTransform: 'none', fontSize: '0.75rem', bgcolor: '#9334e6', '&:hover': { bgcolor: '#7b2bc4' } }}
+                          >
+                            Scan All {deployableFlexRecs.length} Flex Zones
+                          </Button>
+                        </Box>
+                      )}
+                      <TableContainer>
+                        <Table size="small">
+                          <TableHead>
+                            <TableRow>
+                              <TableCell>Zone</TableCell>
+                              <TableCell>Instances</TableCell>
+                              <TableCell>Availability</TableCell>
+                              <TableCell>Est. Wait</TableCell>
+                              <TableCell align="right">Action</TableCell>
+                            </TableRow>
+                          </TableHead>
+                          <TableBody>
+                            {sortedFlexRecs.map((rec, idx) => (
+                              <TableRow key={idx} hover
+                                sx={rec.availability === 'HIGH' ? { bgcolor: '#e6f4ea' } : {}}>
+                                <TableCell sx={{ fontWeight: 500 }}>{rec.zone}</TableCell>
+                                <TableCell>{rec.instanceCount ?? '—'}</TableCell>
+                                <TableCell><AvailabilityChip availability={rec.availability} /></TableCell>
+                                <TableCell sx={{ fontSize: '0.75rem', color: '#5f6368' }}>{rec.estimatedWait || '—'}</TableCell>
+                                <TableCell align="right">
+                                  {onDeployRecommendation && rec.availability !== 'NONE' && (
+                                    <Tooltip title={`Pre-fill Scan & Deploy with DWS Flex Start in ${rec.zone}`}>
+                                      <Button
+                                        size="small"
+                                        variant="outlined"
+                                        startIcon={<RocketLaunchIcon sx={{ fontSize: 13 }} />}
+                                        onClick={() =>
+                                          onDeployRecommendation({
+                                            category,
+                                            chip,
+                                            machineType,
+                                            vmCount: rec.instanceCount || flexSize,
+                                            method: 'dws_flex',
+                                            zones: [rec.zone],
+                                            flexUsageDurationHours: flexMaxRunHours,
+                                            sourceLabel: 'DWS Flex Start Advisory',
+                                          })
+                                        }
+                                        sx={{
+                                          py: 0.2,
+                                          px: 1,
+                                          fontSize: '0.68rem',
+                                          textTransform: 'none',
+                                          bgcolor: '#fff',
+                                          color: '#9334e6',
+                                          borderColor: '#9334e6',
+                                        }}
+                                      >
+                                        Deploy
+                                      </Button>
+                                    </Tooltip>
+                                  )}
+                                </TableCell>
+                              </TableRow>
+                            ))}
+                          </TableBody>
+                        </Table>
+                      </TableContainer>
+                    </>
+                  )
+                })() : (
                   <Alert severity="warning">No Flex Start advisory recommendations found.</Alert>
                 )}
                 <ErrorsCollapse errors={flexResults.errors}

@@ -93,21 +93,35 @@ export default function ScanningPanel({ machineTypes = [], loading: mtLoading, p
     const count = Math.max(1, parseInt(deployPreset.vmCount) || 1)
     setMinVmCount(count)
     setMaxVmCount(count)
+    const method = deployPreset.method || 'dws_calendar'
     const startLocal = toUtcDatetimeLocal(deployPreset.startTime)
     const endLocal = toUtcDatetimeLocal(deployPreset.endTime)
+    const flexUsageHours = Math.max(1, parseInt(deployPreset.flexUsageDurationHours) || 24)
     const zones = Array.isArray(deployPreset.zones) ? deployPreset.zones.filter(Boolean) : []
     setPriorities([{
       ...DEFAULT_PRIORITY,
-      method: deployPreset.method || 'dws_calendar',
+      method,
       zones,
       calendarStartTime: startLocal,
       calendarEndTime: endLocal,
+      flexUsageDurationHours: flexUsageHours,
     }])
+    const sourceLabel =
+      deployPreset.sourceLabel ||
+      (method === 'spot'
+        ? 'Spot VM Advisory'
+        : method === 'dws_flex'
+        ? 'DWS Flex Start Advisory'
+        : 'DWS Calendar Advisory')
     setPresetBanner({
+      sourceLabel,
+      method,
+      vmCount: count,
       machineType: deployPreset.machineType,
       zones,
       startTime: startLocal ? `${startLocal.replace('T', ' ')} UTC` : 'Auto (Advisory)',
       endTime: endLocal ? `${endLocal.replace('T', ' ')} UTC` : 'Auto (Advisory)',
+      flexUsageHours,
     })
   }, [deployPreset])
 
@@ -387,8 +401,16 @@ export default function ScanningPanel({ machineTypes = [], loading: mtLoading, p
         </Typography>
         {presetBanner && (
           <Alert severity="success" onClose={() => setPresetBanner(null)} sx={{ mt: 1.5 }}>
-            Pre-filled from <strong>DWS Calendar Advisory</strong>: <strong>{presetBanner.machineType}</strong> in{' '}
-            <strong>{presetBanner.zones.join(', ')}</strong> ({presetBanner.startTime} → {presetBanner.endTime}). Click <strong>Start Scan</strong> to deploy.
+            Pre-filled from <strong>{presetBanner.sourceLabel}</strong>:{' '}
+            <strong>{presetBanner.vmCount}x {presetBanner.machineType}</strong> in{' '}
+            <strong>{presetBanner.zones.join(', ')}</strong>
+            {presetBanner.method === 'dws_calendar' && (
+              <> ({presetBanner.startTime} → {presetBanner.endTime})</>
+            )}
+            {presetBanner.method === 'dws_flex' && (
+              <> ({presetBanner.flexUsageHours}h run duration)</>
+            )}
+            . Click <strong>Start Scan</strong> to deploy.
           </Alert>
         )}
       </Box>
