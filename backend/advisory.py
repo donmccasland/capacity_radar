@@ -427,12 +427,12 @@ async def _query_calendar_advisory_region(
                                 "vmCount": vm_count,
                                 "status": status,
                                 "details": details,
-                                "startTime": start_time,
-                                "endTime": end_time,
+                                "startTime": spec.get("startTime", start_time),
+                                "endTime": spec.get("endTime", end_time),
                                 "confidence": confidence,
-                            "source": "DWS Calendar Advisory",
-                            "recommendationType": rec_type,
-                        })
+                                "source": "DWS Calendar Advisory",
+                                "recommendationType": rec_type,
+                            })
 
                 if not data.get("recommendations"):
                     recommendations.append({

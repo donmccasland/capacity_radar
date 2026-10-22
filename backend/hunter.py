@@ -696,6 +696,51 @@ class ScanningSession:
             await self.emit("warning", f"⚠️ Timeout in {zone}")
             return False
 
+    async def _discover_calendar_advisory_window(
+        self, token: str, zone: str, min_start_dt: datetime, duration_hours: int
+    ) -> tuple[datetime | None, datetime | None]:
+        """Query DWS Calendar Advisory for `zone` when the user did not specify an explicit
+        start time, returning the recommended (start_dt, end_dt) window if available."""
+        region = zone.rsplit("-", 1)[0] if "-" in zone else zone
+        cache_attr = "_calendar_advisory_cache"
+        cache = getattr(self, cache_attr, None)
+        if cache is None:
+            cache = {}
+            setattr(self, cache_attr, cache)
+
+        cache_key = (region, self.machine_type, self.vm_count)
+        if cache_key not in cache:
+            try:
+                from advisory import _query_calendar_advisory_region
+                duration_days = max(1, (duration_hours + 23) // 24)
+                search_start = min_start_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+                search_end = (min_start_dt + timedelta(days=max(7, duration_days))).strftime("%Y-%m-%dT%H:%M:%SZ")
+                recs = await _query_calendar_advisory_region(
+                    token, self.project, region, self.machine_type, self.vm_count,
+                    search_start, search_end, 1, max(7, duration_days)
+                )
+                cache[cache_key] = recs or []
+            except Exception:
+                cache[cache_key] = []
+
+        for rec in cache.get(cache_key, []):
+            if rec.get("zone") == zone and rec.get("status") == "RECOMMENDED":
+                s_raw = rec.get("startTime", "")
+                e_raw = rec.get("endTime", "")
+                if s_raw and e_raw:
+                    try:
+                        s_norm = _normalize_datetime(s_raw)
+                        e_norm = _normalize_datetime(e_raw)
+                        s_dt = datetime.strptime(s_norm, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                        e_dt = datetime.strptime(e_norm, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                        await self.emit("info",
+                            f"📅 [Calendar Advisory] Auto-selected recommended window in {zone}: "
+                            f"{s_norm} → {e_norm}")
+                        return s_dt, e_dt
+                    except ValueError:
+                        pass
+        return None, None
+
     async def _try_dws_calendar_rest(self, zone: str, name_prefix: str = "",
                                       calendar_start_time: str = "",
                                       calendar_end_time: str = "") -> bool:
@@ -706,13 +751,20 @@ class ScanningSession:
         now_utc = datetime.now(timezone.utc)
         min_gpu_start = (now_utc + timedelta(hours=88)).replace(minute=0, second=0, microsecond=0)
 
-        # Use per-priority start/end times if provided, otherwise fallback to 88h lead time
+        # Use per-priority start/end times if provided, otherwise query Calendar Advisory first
+        adv_start_dt, adv_end_dt = (None, None)
+        if not calendar_start_time:
+            adv_start_dt, adv_end_dt = await self._discover_calendar_advisory_window(
+                token, zone, min_gpu_start, max(24, self.dws_calendar_duration_hours))
+
         if calendar_start_time:
             start_str = _normalize_datetime(calendar_start_time)
             try:
                 start_dt = datetime.strptime(start_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
             except ValueError:
                 start_dt = min_gpu_start
+        elif adv_start_dt:
+            start_dt = adv_start_dt
         else:
             start_dt = min_gpu_start
 
@@ -722,6 +774,8 @@ class ScanningSession:
                 end_dt = datetime.strptime(end_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
             except ValueError:
                 end_dt = start_dt + timedelta(hours=self.dws_calendar_duration_hours)
+        elif adv_end_dt and not calendar_start_time:
+            end_dt = adv_end_dt
         else:
             end_dt = start_dt + timedelta(hours=self.dws_calendar_duration_hours)
 
@@ -744,6 +798,7 @@ class ScanningSession:
         url = (f"https://compute.googleapis.com/compute/v1/projects/{self.project}"
                f"/zones/{zone}/futureReservations")
         prefix_tag = name_prefix if name_prefix else f"gpu-radar-{self.session_id[:8]}"
+        rsv_name = f"{prefix_tag}-rsv"[:38].rstrip("-")
         # Calendar mode requires DENSE for all GPU VMs and specificReservationRequired=true
         from gpu_data import MACHINE_TO_FAMILY
         family = MACHINE_TO_FAMILY.get(self.machine_type, "")
@@ -754,8 +809,8 @@ class ScanningSession:
             "specificReservationRequired": True,
             "planningStatus": "SUBMITTED",
             "reservationMode": "CALENDAR",
-            "reservationName": f"{prefix_tag}-rsv",
-            "namePrefix": prefix_tag,
+            "reservationName": rsv_name,
+            "namePrefix": prefix_tag[:38],
             "specificSkuProperties": {
                 "totalCount": str(self.vm_count),
                 "instanceProperties": {"machineType": self.machine_type}
@@ -795,7 +850,7 @@ class ScanningSession:
                     return False
                 else:
                     err_msg = self._parse_api_error(data)
-                    self._mark_quota_exhausted(ConsumptionModel.DWS_CALENDAR, zone, err_msg)
+                    self._mark_quota_exhausted(ConsumptionModel.DWS_CALENDAR, zone, err_msg, resp.status_code)
                     await self.emit("warning",
                         f"⚠️ DWS Calendar failed in {zone}: {err_msg}")
                     return False
@@ -1596,9 +1651,11 @@ class ScanningSession:
         """Create a Compute Engine Future Reservation in CALENDAR mode for Cloud TPUs.
 
         DWS Calendar Mode for TPUs uses Compute Engine Future Reservations with
-        `reservationMode: "CALENDAR"`, `deploymentType: "DENSE"`, and `aggregateReservation`
-        (specifying the TPU `vmFamily` and total `acceleratorCount`), and requires at
-        least a 6-hour lead time prior to `startTime`.
+        `reservationMode: "CALENDAR"` and `aggregateReservation` (specifying the TPU
+        `vmFamily` and total `acceleratorCount`), and requires at least a 6-hour lead
+        time prior to `startTime`. Note: unlike `advice/calendarMode` (which requires
+        `deploymentType: "DENSE"`), `futureReservations.insert` forbids setting
+        `deploymentType: "DENSE"` on TPU `aggregateReservation` requests.
         """
         tpu_version = self._get_tpu_version()
         vm_family = TPU_CALENDAR_VM_FAMILY.get(tpu_version)
@@ -1616,12 +1673,21 @@ class ScanningSession:
         now_utc = datetime.now(timezone.utc)
         min_tpu_start = (now_utc + timedelta(hours=7)).replace(minute=0, second=0, microsecond=0)
 
+        # If user did not specify an explicit start time, check DWS Calendar Advisory first
+        # so Scan & Deploy automatically targets the available window recommended by Advisory.
+        adv_start_dt, adv_end_dt = (None, None)
+        if not calendar_start_time:
+            adv_start_dt, adv_end_dt = await self._discover_calendar_advisory_window(
+                token, zone, min_tpu_start, max(24, self.dws_calendar_duration_hours))
+
         if calendar_start_time:
             start_str = _normalize_datetime(calendar_start_time)
             try:
                 start_dt = datetime.strptime(start_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
             except ValueError:
                 start_dt = min_tpu_start
+        elif adv_start_dt:
+            start_dt = adv_start_dt
         else:
             start_dt = min_tpu_start
 
@@ -1631,6 +1697,8 @@ class ScanningSession:
                 end_dt = datetime.strptime(end_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
             except ValueError:
                 end_dt = start_dt + timedelta(hours=max(24, self.dws_calendar_duration_hours))
+        elif adv_end_dt and not calendar_start_time:
+            end_dt = adv_end_dt
         else:
             end_dt = start_dt + timedelta(hours=max(24, self.dws_calendar_duration_hours))
 
@@ -1653,14 +1721,15 @@ class ScanningSession:
         url = (f"https://compute.googleapis.com/compute/beta/projects/{self.project}"
                f"/zones/{zone}/futureReservations")
         prefix_tag = name_prefix if name_prefix else f"gpu-radar-{self.session_id[:8]}"
+        rsv_name = f"{prefix_tag}-rsv"[:38].rstrip("-")
         body = {
             "name": fr_name,
             "reservationMode": "CALENDAR",
             "planningStatus": "SUBMITTED",
-            "deploymentType": "DENSE",
             "specificReservationRequired": True,
             "autoDeleteAutoCreatedReservations": True,
-            "namePrefix": prefix_tag,
+            "reservationName": rsv_name,
+            "namePrefix": prefix_tag[:38],
             "timeWindow": {
                 "startTime": start_str,
                 "endTime": end_str,

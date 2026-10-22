@@ -57,7 +57,13 @@ export default function App() {
   const [signedInEmail, setSignedInEmail] = useState('')
   const [tokenInput, setTokenInput] = useState('')
   const [userToken, setUserToken] = useState(() => sessionStorage.getItem('cr_user_token') || '')
+  const [deployPreset, setDeployPreset] = useState(null)
   const projectInputRef = useRef('')
+
+  const handleDeployFromAdvisory = useCallback((preset) => {
+    setDeployPreset({ ...preset, _ts: Date.now() })
+    setTab(1)
+  }, [])
 
   useEffect(() => {
     // Fetch config and machine types in parallel
@@ -598,10 +604,22 @@ export default function App() {
 
             <Container maxWidth="xl" sx={{ py: 3 }}>
               <TabPanel value={tab} index={0}>
-                <AdvisoryPanel machineTypes={machineTypes} loading={loading} project={project} userToken={userToken} />
+                <AdvisoryPanel
+                  machineTypes={machineTypes}
+                  loading={loading}
+                  project={project}
+                  userToken={userToken}
+                  onDeployRecommendation={handleDeployFromAdvisory}
+                />
               </TabPanel>
               <TabPanel value={tab} index={1}>
-                <ScanningPanel machineTypes={machineTypes} loading={loading} project={project} userToken={userToken} />
+                <ScanningPanel
+                  machineTypes={machineTypes}
+                  loading={loading}
+                  project={project}
+                  userToken={userToken}
+                  deployPreset={deployPreset}
+                />
               </TabPanel>
             </Container>
           </Box>

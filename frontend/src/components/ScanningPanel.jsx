@@ -63,7 +63,14 @@ function stripEmojis(text) {
     .replace(/^\s+/, '')
 }
 
-export default function ScanningPanel({ machineTypes = [], loading: mtLoading, project = '', userToken = '' }) {
+function toUtcDatetimeLocal(isoStr) {
+  if (!isoStr) return ''
+  const d = new Date(isoStr)
+  if (isNaN(d.getTime())) return ''
+  return d.toISOString().slice(0, 16)
+}
+
+export default function ScanningPanel({ machineTypes = [], loading: mtLoading, project = '', userToken = '', deployPreset = null }) {
 
   const authHeaders = userToken ? { 'X-User-Token': userToken } : {}
 
@@ -76,6 +83,33 @@ export default function ScanningPanel({ machineTypes = [], loading: mtLoading, p
   const [priorities, setPriorities] = useState([{ ...DEFAULT_PRIORITY }])
   const [executionMode, setExecutionMode] = useState('sequential')
   const [showUnsupported, setShowUnsupported] = useState(false)
+  const [presetBanner, setPresetBanner] = useState(null)
+
+  useEffect(() => {
+    if (!deployPreset || scanning) return
+    if (deployPreset.category) setCategory(deployPreset.category)
+    if (deployPreset.chip) setChip(deployPreset.chip)
+    if (deployPreset.machineType) setMachineType(deployPreset.machineType)
+    const count = Math.max(1, parseInt(deployPreset.vmCount) || 1)
+    setMinVmCount(count)
+    setMaxVmCount(count)
+    const startLocal = toUtcDatetimeLocal(deployPreset.startTime)
+    const endLocal = toUtcDatetimeLocal(deployPreset.endTime)
+    const zones = Array.isArray(deployPreset.zones) ? deployPreset.zones.filter(Boolean) : []
+    setPriorities([{
+      ...DEFAULT_PRIORITY,
+      method: deployPreset.method || 'dws_calendar',
+      zones,
+      calendarStartTime: startLocal,
+      calendarEndTime: endLocal,
+    }])
+    setPresetBanner({
+      machineType: deployPreset.machineType,
+      zones,
+      startTime: startLocal ? `${startLocal.replace('T', ' ')} UTC` : 'Auto (Advisory)',
+      endTime: endLocal ? `${endLocal.replace('T', ' ')} UTC` : 'Auto (Advisory)',
+    })
+  }, [deployPreset])
 
   // VPC network selection (empty = auto-select: prefer 'default', else first
   // VPC with a subnet in the region). Fixes deploys on projects without a
@@ -351,6 +385,12 @@ export default function ScanningPanel({ machineTypes = [], loading: mtLoading, p
         <Typography variant="body1" color="text.secondary">
           Scan for available GPU/TPU capacity and automatically deploy reservations or VMs.
         </Typography>
+        {presetBanner && (
+          <Alert severity="success" onClose={() => setPresetBanner(null)} sx={{ mt: 1.5 }}>
+            Pre-filled from <strong>DWS Calendar Advisory</strong>: <strong>{presetBanner.machineType}</strong> in{' '}
+            <strong>{presetBanner.zones.join(', ')}</strong> ({presetBanner.startTime} → {presetBanner.endTime}). Click <strong>Start Scan</strong> to deploy.
+          </Alert>
+        )}
       </Box>
 
       <Grid container spacing={3}>
@@ -630,22 +670,22 @@ export default function ScanningPanel({ machineTypes = [], loading: mtLoading, p
                     {priority.method === 'dws_calendar' && (
                       <Box sx={{ mt: 1.5, p: 1.5, bgcolor: '#e8f5e9', borderRadius: 1, border: '1px solid #c8e6c9' }}>
                         <Typography variant="caption" sx={{ fontWeight: 600, color: '#2e7d32', display: 'flex', alignItems: 'center', gap: 0.5, mb: 1 }}>
-                          <CalendarMonthIcon sx={{ fontSize: 14 }} /> Calendar Mode Settings
+                          <CalendarMonthIcon sx={{ fontSize: 14 }} /> Calendar Mode Settings (UTC)
                         </Typography>
                         <Grid container spacing={1.5}>
                           <Grid item xs={6}>
-                            <TextField fullWidth type="datetime-local" label="Start Time"
+                            <TextField fullWidth type="datetime-local" label="Start Time (UTC)"
                               value={priority.calendarStartTime || ''}
                               onChange={(e) => updatePriority(index, 'calendarStartTime', e.target.value)}
                               size="small" disabled={scanning} InputLabelProps={{ shrink: true }}
-                              helperText="When reservation begins" />
+                              helperText="Leave blank to auto-select Advisory window" />
                           </Grid>
                           <Grid item xs={6}>
-                            <TextField fullWidth type="datetime-local" label="End Time"
+                            <TextField fullWidth type="datetime-local" label="End Time (UTC)"
                               value={priority.calendarEndTime || ''}
                               onChange={(e) => updatePriority(index, 'calendarEndTime', e.target.value)}
                               size="small" disabled={scanning} InputLabelProps={{ shrink: true }}
-                              helperText="When reservation ends" />
+                              helperText="Leave blank to auto-select Advisory window" />
                           </Grid>
                         </Grid>
                       </Box>

@@ -19,8 +19,28 @@ import ExpandLessIcon from '@mui/icons-material/ExpandLess'
 import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline'
 import WarningAmberIcon from '@mui/icons-material/WarningAmber'
 import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline'
+import RocketLaunchIcon from '@mui/icons-material/RocketLaunch'
 
-export default function AdvisoryPanel({ machineTypes = [], loading: mtLoading, project = '', userToken = '' }) {
+function formatUtcShort(isoStr) {
+  if (!isoStr) return '—'
+  const d = new Date(isoStr)
+  if (isNaN(d.getTime())) return isoStr
+  return d.toISOString().replace('T', ' ').slice(0, 16) + ' UTC'
+}
+
+function formatWindowSummary(startTime, endTime) {
+  if (!startTime || !endTime) return null
+  const s = new Date(startTime)
+  const e = new Date(endTime)
+  if (isNaN(s.getTime()) || isNaN(e.getTime())) return `${startTime} → ${endTime}`
+  const hours = Math.round((e.getTime() - s.getTime()) / (1000 * 3600))
+  const durLabel = hours >= 24 && hours % 24 === 0 ? `${hours / 24}d` : `${hours}h`
+  const sStr = s.toISOString().slice(5, 16).replace('T', ' ')
+  const eStr = e.toISOString().slice(5, 16).replace('T', ' ')
+  return `${sStr} → ${eStr} UTC (${durLabel})`
+}
+
+export default function AdvisoryPanel({ machineTypes = [], loading: mtLoading, project = '', userToken = '', onDeployRecommendation }) {
   const authHeaders = userToken ? { 'X-User-Token': userToken } : {}
   // Shared config
   const [category, setCategory] = useState('GPU')
@@ -462,6 +482,33 @@ export default function AdvisoryPanel({ machineTypes = [], loading: mtLoading, p
                 <CalendarRecsTable
                   recommendations={calendarResults.recommendations || []}
                   showUnsupported={showUnsupported}
+                  onDeploy={(recOrZoneList) => {
+                    if (!onDeployRecommendation) return
+                    if (Array.isArray(recOrZoneList)) {
+                      const first = recOrZoneList[0] || {}
+                      onDeployRecommendation({
+                        category,
+                        chip,
+                        machineType,
+                        vmCount,
+                        method: 'dws_calendar',
+                        zones: recOrZoneList.map(r => r.zone),
+                        startTime: first.startTime || '',
+                        endTime: first.endTime || '',
+                      })
+                    } else {
+                      onDeployRecommendation({
+                        category,
+                        chip,
+                        machineType,
+                        vmCount: recOrZoneList.vmCount || vmCount,
+                        method: 'dws_calendar',
+                        zones: [recOrZoneList.zone],
+                        startTime: recOrZoneList.startTime || '',
+                        endTime: recOrZoneList.endTime || '',
+                      })
+                    }
+                  }}
                 />
                 <ErrorsCollapse errors={calendarResults.errors}
                   show={showCalendarErrors} setShow={setShowCalendarErrors} />
@@ -497,24 +544,48 @@ export default function AdvisoryPanel({ machineTypes = [], loading: mtLoading, p
                             </Typography>
                           </Box>
                           {recommended.length > 0 ? (
-                            <TableContainer sx={{ maxHeight: 200 }}>
+                            <TableContainer sx={{ maxHeight: 220 }}>
                               <Table size="small">
                                 <TableHead>
                                   <TableRow>
                                     <TableCell>Zone</TableCell>
-                                    <TableCell>Start</TableCell>
-                                    <TableCell>End</TableCell>
+                                    <TableCell>Start (UTC)</TableCell>
+                                    <TableCell>End (UTC)</TableCell>
+                                    <TableCell align="right">Action</TableCell>
                                   </TableRow>
                                 </TableHead>
                                 <TableBody>
                                   {recommended.map((rec, ridx) => (
                                     <TableRow key={ridx} hover sx={{ bgcolor: '#e6f4ea' }}>
                                       <TableCell sx={{ fontWeight: 500 }}>{rec.zone}</TableCell>
-                                      <TableCell sx={{ fontSize: '0.75rem' }}>
-                                        {rec.startTime ? new Date(rec.startTime).toLocaleDateString() : '—'}
+                                      <TableCell sx={{ fontSize: '0.73rem' }}>
+                                        {formatUtcShort(rec.startTime)}
                                       </TableCell>
-                                      <TableCell sx={{ fontSize: '0.75rem' }}>
-                                        {rec.endTime ? new Date(rec.endTime).toLocaleDateString() : '—'}
+                                      <TableCell sx={{ fontSize: '0.73rem' }}>
+                                        {formatUtcShort(rec.endTime)}
+                                      </TableCell>
+                                      <TableCell align="right">
+                                        {onDeployRecommendation && (
+                                          <Button
+                                            size="small"
+                                            variant="outlined"
+                                            color="success"
+                                            startIcon={<RocketLaunchIcon sx={{ fontSize: 13 }} />}
+                                            sx={{ py: 0.2, px: 1, fontSize: '0.68rem', textTransform: 'none' }}
+                                            onClick={() => onDeployRecommendation({
+                                              category,
+                                              chip,
+                                              machineType,
+                                              vmCount: split.vmCount,
+                                              method: 'dws_calendar',
+                                              zones: [rec.zone],
+                                              startTime: rec.startTime || '',
+                                              endTime: rec.endTime || '',
+                                            })}
+                                          >
+                                            Deploy
+                                          </Button>
+                                        )}
                                       </TableCell>
                                     </TableRow>
                                   ))}
@@ -751,12 +822,13 @@ export default function AdvisoryPanel({ machineTypes = [], loading: mtLoading, p
 
 // --- Helper components ---
 
-function CalendarRecsTable({ recommendations, showUnsupported }) {
+function CalendarRecsTable({ recommendations, showUnsupported, onDeploy }) {
   const validStatuses = ['RECOMMENDED', 'NO_CAPACITY', 'NO_DATA']
   const filteredRecs = showUnsupported
     ? recommendations
     : recommendations.filter(r => validStatuses.includes(r.status))
   const hiddenCount = recommendations.length - filteredRecs.length
+  const recommendedRecs = filteredRecs.filter(r => r.status === 'RECOMMENDED')
 
   if (filteredRecs.length === 0) {
     return (
@@ -770,13 +842,28 @@ function CalendarRecsTable({ recommendations, showUnsupported }) {
 
   return (
     <>
+      {recommendedRecs.length > 1 && onDeploy && (
+        <Box sx={{ display: 'flex', justifyContent: 'flex-end', mb: 1 }}>
+          <Button
+            size="small"
+            variant="contained"
+            color="success"
+            startIcon={<RocketLaunchIcon sx={{ fontSize: 15 }} />}
+            onClick={() => onDeploy(recommendedRecs)}
+            sx={{ textTransform: 'none', fontSize: '0.75rem' }}
+          >
+            Scan All {recommendedRecs.length} Recommended Zones
+          </Button>
+        </Box>
+      )}
       <TableContainer>
         <Table size="small">
           <TableHead>
             <TableRow>
               <TableCell>Zone</TableCell>
               <TableCell>Status</TableCell>
-              <TableCell>Details</TableCell>
+              <TableCell>Available Window / Details</TableCell>
+              <TableCell align="right">Action</TableCell>
             </TableRow>
           </TableHead>
           <TableBody>
@@ -786,19 +873,53 @@ function CalendarRecsTable({ recommendations, showUnsupported }) {
                 if (a.status !== 'RECOMMENDED' && b.status === 'RECOMMENDED') return 1
                 return 0
               })
-              .map((rec, idx) => (
-              <TableRow key={idx} hover sx={rec.status === 'RECOMMENDED' ? { bgcolor: '#e6f4ea' } : {}}>
-                <TableCell sx={{ fontWeight: 500 }}>{rec.zone}</TableCell>
-                <TableCell>
-                  <Chip label={rec.status || 'UNKNOWN'} size="small"
-                    color={rec.status === 'RECOMMENDED' ? 'success' : rec.status === 'NO_CAPACITY' ? 'error' : 'default'}
-                    sx={{ height: 22, fontSize: '0.65rem' }} />
-                </TableCell>
-                <TableCell sx={{ fontSize: '0.75rem', color: '#5f6368' }}>
-                  {rec.details || (rec.status === 'RECOMMENDED' ? 'Capacity available' : '—')}
-                </TableCell>
-              </TableRow>
-            ))}
+              .map((rec, idx) => {
+                const winSummary = rec.status === 'RECOMMENDED'
+                  ? formatWindowSummary(rec.startTime, rec.endTime)
+                  : null
+                return (
+                  <TableRow key={idx} hover sx={rec.status === 'RECOMMENDED' ? { bgcolor: '#e6f4ea' } : {}}>
+                    <TableCell sx={{ fontWeight: 500 }}>{rec.zone}</TableCell>
+                    <TableCell>
+                      <Chip label={rec.status || 'UNKNOWN'} size="small"
+                        color={rec.status === 'RECOMMENDED' ? 'success' : rec.status === 'NO_CAPACITY' ? 'error' : 'default'}
+                        sx={{ height: 22, fontSize: '0.65rem' }} />
+                    </TableCell>
+                    <TableCell sx={{ fontSize: '0.75rem', color: '#3c4043' }}>
+                      {winSummary ? (
+                        <Box>
+                          <Typography variant="caption" sx={{ fontWeight: 600, color: '#137333', display: 'block', fontSize: '0.73rem' }}>
+                            {winSummary}
+                          </Typography>
+                          {rec.details && (
+                            <Typography variant="caption" sx={{ color: '#5f6368', fontSize: '0.68rem' }}>
+                              {rec.details}
+                            </Typography>
+                          )}
+                        </Box>
+                      ) : (
+                        rec.details || (rec.status === 'RECOMMENDED' ? 'Capacity available' : '—')
+                      )}
+                    </TableCell>
+                    <TableCell align="right">
+                      {rec.status === 'RECOMMENDED' && onDeploy && (
+                        <Tooltip title="Pre-fill Scan & Deploy with this zone and recommended window">
+                          <Button
+                            size="small"
+                            variant="outlined"
+                            color="success"
+                            startIcon={<RocketLaunchIcon sx={{ fontSize: 13 }} />}
+                            onClick={() => onDeploy(rec)}
+                            sx={{ py: 0.2, px: 1, fontSize: '0.68rem', textTransform: 'none', bgcolor: '#fff' }}
+                          >
+                            Deploy
+                          </Button>
+                        </Tooltip>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                )
+              })}
           </TableBody>
         </Table>
       </TableContainer>
