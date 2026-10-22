@@ -40,15 +40,25 @@ async def get_gcloud_access_token() -> str:
 def _compute_time_window(start_date: str, flexibility_days: int, duration_days: int):
     """Compute API time window from simplified user inputs.
     Returns (start_str, end_str) as ISO 8601 UTC strings.
+    Enforces at least a 6h 15m lead time from current UTC time so same-day or
+    next-day midnight selections do not violate DWS Calendar minimum lead time.
     """
+    now_utc = datetime.now(timezone.utc)
+    min_start = (now_utc + timedelta(hours=6, minutes=15)).replace(microsecond=0)
     if start_date:
         base = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     else:
-        base = datetime.now(timezone.utc) + timedelta(days=1)
+        tomorrow = now_utc + timedelta(days=1)
+        base = tomorrow.replace(hour=0, minute=0, second=0, microsecond=0)
 
-    start_str = base.strftime("%Y-%m-%dT00:00:00Z")
-    end_date = base + timedelta(days=flexibility_days)
+    if base < min_start:
+        base = min_start
+
+    start_str = base.strftime("%Y-%m-%dT%H:%M:%SZ")
+    end_date = base + timedelta(days=max(1, flexibility_days))
     end_str = end_date.strftime("%Y-%m-%dT23:59:59Z")
+    if end_str <= start_str:
+        end_str = (base + timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
     return start_str, end_str
 
 
@@ -66,15 +76,21 @@ def _resolve_regions_zones(regions, zones):
 
 
 def _check_tpu(machine_type: str, results: dict, api_name: str = "calendar") -> bool:
-    """Check if machine_type is a TPU. Returns True (skip) for all TPUs since the
-    Calendar Advisory API does not support TPU machine families.
+    """Check if machine_type is a TPU that does NOT support the Calendar Advisory API.
+    Returns False for TPU generations supported by `advice/calendarMode` via
+    `aggregateResources` (v7x, v6e, v5p, v5e), and True (skip) only for legacy
+    TPU generations (v4, v3, v2).
     """
-    from gpu_data import TPU_TYPES
+    from gpu_data import TPU_TYPES, TPU_CALENDAR_VM_FAMILY
     is_tpu = any(machine_type in t.get("machine_types", {}) for t in TPU_TYPES.values())
     if not is_tpu:
         return False
 
     tpu_gen = next((k for k, v in TPU_TYPES.items() if machine_type in v.get("machine_types", {})), "")
+    if tpu_gen in TPU_CALENDAR_VM_FAMILY:
+        # Supported via compute/beta advice/calendarMode with aggregateResources!
+        return False
+
     tpu_info = TPU_TYPES.get(tpu_gen, {})
     zones_list = tpu_info.get("zones", [])
     supported = tpu_info.get("supported", {})
@@ -90,25 +106,15 @@ def _check_tpu(machine_type: str, results: dict, api_name: str = "calendar") -> 
         "specs": tpu_info.get("machine_types", {}).get(machine_type, {}),
     }
 
-    if supported.get("dws_calendar"):
-        # TPU supports DWS Calendar reservations, but the Advisory API doesn't support TPU
-        results["message"] = (
-            f"The Calendar Advisory API does not support TPU machine types. "
-            f"However, {tpu_info.get('gpu', tpu_gen)} ({machine_type}) fully supports "
-            f"DWS Calendar reservations — you can create them directly using the Scan & Deploy tab. "
-            f"Available in {len(zones_list)} zone(s) across "
-            f"{len(set(z.rsplit('-', 1)[0] for z in zones_list))} region(s)."
-        )
-    else:
-        results["message"] = (
-            f"Calendar Advisory API is not available for {tpu_info.get('gpu', tpu_gen)} ({machine_type}). "
-            f"This TPU type supports: "
-            f"{'On-Demand, ' if supported.get('on_demand') else ''}"
-            f"{'Spot, ' if supported.get('spot') else ''}"
-            f"{'DWS Flex' if supported.get('dws_flex') else ''}"
-            f". Available in {len(zones_list)} zone(s) across "
-            f"{len(set(z.rsplit('-', 1)[0] for z in zones_list))} region(s)."
-        )
+    results["message"] = (
+        f"Calendar Advisory API is not available for {tpu_info.get('gpu', tpu_gen)} ({machine_type}). "
+        f"This TPU type supports: "
+        f"{'On-Demand, ' if supported.get('on_demand') else ''}"
+        f"{'Spot, ' if supported.get('spot') else ''}"
+        f"{'DWS Flex' if supported.get('dws_flex') else ''}"
+        f". Available in {len(zones_list)} zone(s) across "
+        f"{len(set(z.rsplit('-', 1)[0] for z in zones_list))} region(s)."
+    )
     return True
 
 
@@ -168,7 +174,7 @@ async def get_calendar_advisory(
     for region in sorted(target_regions):
         tasks.append(_query_calendar_advisory_region(
             token, project, region, machine_type, vm_count,
-            start_str, end_str, duration_days, duration_days
+            start_str, end_str, 1, max(1, duration_days)
         ))
 
     region_results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -297,41 +303,65 @@ async def _query_calendar_advisory_region(
     """Query calendar advisory for a single region using REST API."""
     import httpx
 
-    url = (
-        f"https://compute.googleapis.com/compute/v1/projects/{project}"
-        f"/regions/{region}/advice/calendarMode"
-    )
-
     # Convert days to seconds for API
     min_duration_secs = duration_min_days * 86400
     max_duration_secs = duration_max_days * 86400
 
-    from gpu_data import MACHINE_TO_FAMILY
+    from gpu_data import MACHINE_TO_FAMILY, TPU_CALENDAR_VM_FAMILY
     tpu_info = _get_tpu_info(machine_type)
 
-    # Both GPU and TPU use specificSkuResources with their machine type
-    target_resources = {
-        "specificSkuResources": {
-            "instanceCount": str(vm_count),
-            "machineType": machine_type,
+    if tpu_info and tpu_info["gen"] in TPU_CALENDAR_VM_FAMILY:
+        # TPUs require the beta endpoint and `aggregateResources` with vmFamily + total chip count
+        url = (
+            f"https://compute.googleapis.com/compute/beta/projects/{project}"
+            f"/regions/{region}/advice/calendarMode"
+        )
+        total_chips = max(1, int(vm_count)) * int(tpu_info["chips"])
+        target_resources = {
+            "aggregateResources": {
+                "acceleratorCount": str(total_chips),
+                "vmFamily": TPU_CALENDAR_VM_FAMILY[tpu_info["gen"]],
+                "workloadType": "BATCH",
+            }
         }
-    }
-    if tpu_info:
-        logger.info(f"TPU Calendar Advisory: {machine_type} (chips={tpu_info['chips']}, count={vm_count})")
-
-    family = MACHINE_TO_FAMILY.get(machine_type, "")
-    dense_families = ("A4", "A3 Ultra", "A3 Mega", "A3 High", "A3 Edge")
-    spec_body = {
-        "targetResources": target_resources,
-        "timeRangeSpec": {
-            "minDuration": f"{min_duration_secs}s",
-            "maxDuration": f"{max_duration_secs}s",
-            "startTimeNotEarlierThan": start_time,
-            "startTimeNotLaterThan": end_time,
-        },
-    }
-    if not tpu_info and family in dense_families:
-        spec_body["deploymentType"] = "DENSE"
+        logger.info(
+            f"TPU Calendar Advisory: {machine_type} "
+            f"(vmFamily={TPU_CALENDAR_VM_FAMILY[tpu_info['gen']]}, total_chips={total_chips})"
+        )
+        spec_body = {
+            "deploymentType": "DENSE",
+            "targetResources": target_resources,
+            "timeRangeSpec": {
+                "minDuration": f"{min_duration_secs}s",
+                "maxDuration": f"{max_duration_secs}s",
+                "startTimeNotEarlierThan": start_time,
+                "startTimeNotLaterThan": end_time,
+            },
+        }
+    else:
+        url = (
+            f"https://compute.googleapis.com/compute/v1/projects/{project}"
+            f"/regions/{region}/advice/calendarMode"
+        )
+        target_resources = {
+            "specificSkuResources": {
+                "instanceCount": str(vm_count),
+                "machineType": machine_type,
+            }
+        }
+        family = MACHINE_TO_FAMILY.get(machine_type, "")
+        dense_families = ("A4", "A3 Ultra", "A3 Mega", "A3 High", "A3 Edge")
+        spec_body = {
+            "targetResources": target_resources,
+            "timeRangeSpec": {
+                "minDuration": f"{min_duration_secs}s",
+                "maxDuration": f"{max_duration_secs}s",
+                "startTimeNotEarlierThan": start_time,
+                "startTimeNotLaterThan": end_time,
+            },
+        }
+        if family in dense_families:
+            spec_body["deploymentType"] = "DENSE"
 
     body = {
         "futureResourcesSpecs": {

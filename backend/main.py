@@ -49,16 +49,25 @@ if OAUTH_CLIENT_ID:
     ]
 else:
     TOKEN_INSTRUCTIONS = [
-        "Run in your terminal (Cloud Shell works too):",
-        "gcloud auth print-access-token",
-        "Paste the output into the Access Token field, then click Connect.",
+        "Run in your terminal (use application-default on Corp/CBA workstations):",
+        "gcloud auth application-default print-access-token",
+        "Paste the output into the Access Token field, then click Use Token.",
     ]
 
 
 def _bearer_token(request: Request) -> Optional[str]:
+    # Prefer X-User-Token to avoid colliding with Cloud Run IAP or
+    # `gcloud run services proxy`, both of which intercept or overwrite
+    # the standard Authorization: Bearer header with an OIDC identity JWT.
+    user_hdr = request.headers.get("x-user-token", "").strip()
+    if user_hdr:
+        return user_hdr
     auth = request.headers.get("authorization", "")
     if auth.lower().startswith("bearer "):
-        return auth[7:].strip() or None
+        tok = auth[7:].strip()
+        # Ignore OIDC JWTs injected by `gcloud run services proxy` / IAP
+        if tok and not tok.startswith("eyJ"):
+            return tok
     return None
 
 
@@ -68,7 +77,7 @@ def _require_user_token(user_token: Optional[str]):
             status_code=401,
             detail="This server requires your own Google Cloud credentials. "
                    + ("Sign in with Google to continue." if OAUTH_CLIENT_ID
-                      else "Get a token with: gcloud auth print-access-token"),
+                      else "Get a token with: gcloud auth application-default print-access-token"),
         )
 
 app = FastAPI(
@@ -160,7 +169,7 @@ async def get_config():
         "demoMode": DEMO_MODE,
         "authMode": "user" if USER_AUTH_MODE else "local",
         "oauthClientId": OAUTH_CLIENT_ID,
-        "project": DEFAULT_PROJECT if DEMO_MODE else "",
+        "project": DEFAULT_PROJECT,
         "repoUrl": "https://github.com/MG-Cafe/capacity_radar",
     }
 

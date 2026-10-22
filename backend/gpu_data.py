@@ -479,13 +479,38 @@ CONSUMPTION_SUPPORT = {
     },
 }
 
+# Compute Engine VM family enums used by Calendar Mode Advisory & Future Reservations
+TPU_CALENDAR_VM_FAMILY = {
+    "v7x": "VM_FAMILY_CLOUD_TPU_POD_SLICE_TPU7X",
+    "v6e": "VM_FAMILY_CLOUD_TPU_LITE_POD_SLICE_CT6E",
+    "v5p": "VM_FAMILY_CLOUD_TPU_POD_SLICE_CT5P",
+    "v5e": "VM_FAMILY_CLOUD_TPU_LITE_POD_SLICE_CT5LP",
+}
+
 # TPU types, zones, machine types, and consumption model support
 TPU_TYPES = {
+    "v7x": {
+        "gpu": "Cloud TPU v7x (Ironwood)",
+        "accelerator_prefix": "tpu7x",
+        "runtime_version": "v2-alpha-tpuv7x",
+        "zones": ["us-central1-a", "us-central1-b", "us-central1-c",
+                  "us-east5-a", "us-east5-b"],
+        "machine_types": {
+            "tpu7x-standard-1t": {"chips": 1, "vcpus": 48, "memory_gb": 192, "hbm_gb": 192},
+            "tpu7x-standard-4t": {"chips": 4, "vcpus": 192, "memory_gb": 768, "hbm_gb": 768},
+        },
+        "topologies": ["1x1x1", "2x2x1", "2x2x2", "2x2x4", "4x4x4"],
+        "supported": {"on_demand": True, "spot": True, "dws_calendar": True, "dws_flex": True},
+    },
     "v6e": {
         "gpu": "Cloud TPU v6e (Trillium)",
         "accelerator_prefix": "v6e",
+        "runtime_version": "v2-alpha-tpuv6e",
         "zones": ["asia-northeast1-b", "europe-west4-a", "southamerica-west1-a",
-                   "us-central1-b", "us-east1-d", "us-east5-a", "us-east5-b"],
+                  "us-central1-a", "us-central1-b", "us-east1-d", "us-east5-a",
+                  "us-east5-b", "us-west1-c"],
+        # Dedicated DWS Flex pool zones for TPU v6e (provisioned explicitly)
+        "dws_flex_zones": ["us-central1-a", "us-east5-b", "southamerica-west1-a", "asia-northeast1-b"],
         "machine_types": {
             "ct6e-standard-1t": {"chips": 1, "vcpus": 44, "memory_gb": 176, "hbm_gb": 32},
             "ct6e-standard-4t": {"chips": 4, "vcpus": 180, "memory_gb": 720, "hbm_gb": 128},
@@ -497,6 +522,7 @@ TPU_TYPES = {
     "v5p": {
         "gpu": "Cloud TPU v5p (Viperfish)",
         "accelerator_prefix": "v5p",
+        "runtime_version": "v2-alpha-tpuv5",
         "zones": ["europe-west4-b", "us-central1-a", "us-east5-a"],
         "machine_types": {
             "ct5p-hightpu-1t": {"chips": 1, "vcpus": 52, "memory_gb": 112, "hbm_gb": 95},
@@ -509,8 +535,9 @@ TPU_TYPES = {
     "v5e": {
         "gpu": "Cloud TPU v5e (Viperlite)",
         "accelerator_prefix": "v5litepod",
+        "runtime_version": "v2-alpha-tpuv5-lite",
         "zones": ["europe-west4-b", "us-central1-a", "us-south1-a",
-                   "us-west1-c", "us-west4-a"],
+                  "us-west1-c", "us-west4-a"],
         "machine_types": {
             "ct5e-hightpu-1t": {"chips": 1, "vcpus": 24, "memory_gb": 48, "hbm_gb": 16},
             "ct5e-hightpu-4t": {"chips": 4, "vcpus": 112, "memory_gb": 192, "hbm_gb": 64},
@@ -522,6 +549,7 @@ TPU_TYPES = {
     "v4": {
         "gpu": "Cloud TPU v4 (Pufferfish)",
         "accelerator_prefix": "v4",
+        "runtime_version": "tpu-vm-tf-2.17.0-pjrt",
         "zones": ["us-central2-b"],
         "machine_types": {
             "ct4p-hightpu-4t": {"chips": 4, "vcpus": 240, "memory_gb": 408, "hbm_gb": 128},
@@ -532,6 +560,7 @@ TPU_TYPES = {
     "v3": {
         "gpu": "Cloud TPU v3 (Dragonfish)",
         "accelerator_prefix": "v3",
+        "runtime_version": "tpu-vm-tf-2.17.0-pjrt",
         "zones": ["europe-west4-a", "us-central1-a", "us-central1-b"],
         "machine_types": {
             "v3-8": {"chips": 4, "vcpus": 96, "memory_gb": 340, "hbm_gb": 64},
@@ -542,8 +571,9 @@ TPU_TYPES = {
     "v2": {
         "gpu": "Cloud TPU v2 (Jellyfish)",
         "accelerator_prefix": "v2",
+        "runtime_version": "tpu-vm-tf-2.17.0-pjrt",
         "zones": ["asia-east1-c", "europe-west4-a", "us-central1-a",
-                   "us-central1-b", "us-central1-c"],
+                  "us-central1-b", "us-central1-c"],
         "machine_types": {
             "v2-8": {"chips": 4, "vcpus": 96, "memory_gb": 340, "hbm_gb": 32},
         },

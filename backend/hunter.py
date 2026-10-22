@@ -16,7 +16,8 @@ from enum import Enum
 
 from gpu_data import (
     MACHINE_TYPES, get_zones_for_machine_type, is_consumption_supported,
-    FAMILY_TO_GPU_ZONE_KEY, MACHINE_TO_FAMILY, GPU_ZONES
+    FAMILY_TO_GPU_ZONE_KEY, MACHINE_TO_FAMILY, GPU_ZONES,
+    TPU_TYPES, TPU_CALENDAR_VM_FAMILY
 )
 
 logger = logging.getLogger(__name__)
@@ -114,6 +115,18 @@ class ScanningSession:
         self.network = network or ""
         self.subnetwork = subnetwork or ""
         self._deploy_start_time = datetime.now(timezone.utc)
+        self._quota_exhausted_zones: set[tuple[str, str]] = set()
+
+    def _mark_quota_exhausted(self, method: str, zone: str, err_msg: str = ""):
+        """Record that (method, zone) failed with a non-transient quota error."""
+        if "quota" not in err_msg.lower():
+            return
+        self._quota_exhausted_zones.add((str(method), zone))
+        region = zone.rsplit("-", 1)[0] if "-" in zone else ""
+        if region and ("region" in err_msg.lower() or "per_region" in err_msg.lower()):
+            for z in get_zones_for_machine_type(self.machine_type):
+                if z.startswith(f"{region}-"):
+                    self._quota_exhausted_zones.add((str(method), z))
 
 
     def _tracking_labels(self, method: str) -> dict:
@@ -347,6 +360,17 @@ class ScanningSession:
             for z in skipped:
                 await self.emit("warning", f"⚠️ Zone {z} not supported for {self.machine_type}. Skipping.")
 
+            if self._is_tpu_type() and method == ConsumptionModel.DWS_FLEX:
+                tpu_info = TPU_TYPES.get(self._get_tpu_version(), {})
+                flex_zones = tpu_info.get("dws_flex_zones", [])
+                if flex_zones:
+                    non_flex = [z for z in valid_zones if z not in flex_zones]
+                    for z in non_flex:
+                        await self.emit("warning",
+                            f"⚠️ Zone {z} does not support TPU DWS Flex Start for {self.machine_type} "
+                            f"(supported Flex zones: {', '.join(flex_zones)}). Skipping.")
+                    valid_zones = [z for z in valid_zones if z in flex_zones]
+
             if not valid_zones:
                 await self.emit("warning",
                     f"⚠️ No valid zones for {method_label}. Skipping to next priority.")
@@ -395,6 +419,11 @@ class ScanningSession:
                 await self.emit("warning", f"⚠️ {method_label} not supported. Skipping.")
                 continue
             valid_zones = [z for z in zones if z in supported_zones]
+            if self._is_tpu_type() and method == ConsumptionModel.DWS_FLEX:
+                tpu_info = TPU_TYPES.get(self._get_tpu_version(), {})
+                flex_zones = tpu_info.get("dws_flex_zones", [])
+                if flex_zones:
+                    valid_zones = [z for z in valid_zones if z in flex_zones]
             if not valid_zones:
                 await self.emit("warning", f"⚠️ No valid zones for {method_label}. Skipping.")
                 continue
@@ -432,9 +461,16 @@ class ScanningSession:
             for attempt in range(1, max_retries + 1):
                 if self.cancelled or winner_event.is_set():
                     return False
-                for zone in zones:
+                remaining_zones = [z for z in zones if (str(method), z) not in self._quota_exhausted_zones]
+                if not remaining_zones:
+                    await self.emit("warning",
+                        f"🛑 [{method_label}] All candidate zones exhausted due to insufficient quota — stopping retries.")
+                    break
+                for zone in remaining_zones:
                     if self.cancelled or winner_event.is_set():
                         return False
+                    if (str(method), zone) in self._quota_exhausted_zones:
+                        continue
                     await self.emit("attempt",
                         f"🔄 [{method_label}] Attempt {attempt}/{max_retries} — {zone}",
                         {"attempt": attempt, "zone": zone, "method": method})
@@ -459,6 +495,11 @@ class ScanningSession:
                         await self.emit("error", f"⚠️ [{method_label}] {zone}: {str(e)}")
 
                 if attempt < max_retries and not winner_event.is_set():
+                    remaining_after = [z for z in zones if (str(method), z) not in self._quota_exhausted_zones]
+                    if not remaining_after:
+                        await self.emit("warning",
+                            f"🛑 [{method_label}] All candidate zones exhausted due to insufficient quota — stopping retries.")
+                        break
                     await self.emit("waiting",
                         f"⏳ [{method_label}] Waiting {retry_interval}s ({attempt}/{max_retries})...")
                     for _ in range(retry_interval):
@@ -495,9 +536,16 @@ class ScanningSession:
         for attempt in range(1, max_retries + 1):
             if self.cancelled:
                 return False
-            for zone in zones:
+            remaining_zones = [z for z in zones if (str(method), z) not in self._quota_exhausted_zones]
+            if not remaining_zones:
+                await self.emit("warning",
+                    f"🛑 [{method_label}] All candidate zones exhausted due to insufficient quota — skipping remaining retry attempts.")
+                return False
+            for zone in remaining_zones:
                 if self.cancelled:
                     return False
+                if (str(method), zone) in self._quota_exhausted_zones:
+                    continue
                 await self.emit("attempt",
                     f"🔄 [{method_label}] Attempt {attempt}/{max_retries} — zone: {zone}",
                     {"attempt": attempt, "maxRetries": max_retries, "zone": zone, "method": method})
@@ -512,6 +560,11 @@ class ScanningSession:
                         f"⚠️ [{method_label}] Error in {zone}: {str(e)}",
                         {"zone": zone, "error": str(e), "attempt": attempt})
             if attempt < max_retries:
+                remaining_after = [z for z in zones if (str(method), z) not in self._quota_exhausted_zones]
+                if not remaining_after:
+                    await self.emit("warning",
+                        f"🛑 [{method_label}] All candidate zones exhausted due to insufficient quota — skipping remaining retry attempts.")
+                    return False
                 await self.emit("waiting",
                     f"⏳ Waiting {retry_interval}s before next attempt ({attempt}/{max_retries})...")
                 for _ in range(retry_interval):
@@ -607,8 +660,10 @@ class ScanningSession:
                         self._log_deployment_event("on_demand", zone, res_name, False, "reservation")
                         return False
                 else:
+                    err_msg = self._parse_api_error(data)
+                    self._mark_quota_exhausted(ConsumptionModel.ON_DEMAND, zone, err_msg)
                     await self.emit("warning",
-                        f"⚠️ On-demand failed in {zone}: {self._parse_api_error(data)}")
+                        f"⚠️ On-demand failed in {zone}: {err_msg}")
                     return False
         except httpx.TimeoutException:
             await self.emit("warning", f"⚠️ Timeout in {zone}")
@@ -621,18 +676,39 @@ class ScanningSession:
         res_name = self._make_name(name_prefix, "cal", zone)
         token = await self._get_token()
 
-        # Use per-priority start/end times if provided, otherwise fallback
+        now_utc = datetime.now(timezone.utc)
+        min_gpu_start = (now_utc + timedelta(hours=88)).replace(minute=0, second=0, microsecond=0)
+
+        # Use per-priority start/end times if provided, otherwise fallback to 88h lead time
         if calendar_start_time:
             start_str = _normalize_datetime(calendar_start_time)
+            try:
+                start_dt = datetime.strptime(start_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            except ValueError:
+                start_dt = min_gpu_start
         else:
-            start_time = datetime.now(timezone.utc) + timedelta(hours=1)
-            start_str = start_time.strftime("%Y-%m-%dT%H:%M:%SZ")
+            start_dt = min_gpu_start
 
         if calendar_end_time:
             end_str = _normalize_datetime(calendar_end_time)
+            try:
+                end_dt = datetime.strptime(end_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            except ValueError:
+                end_dt = start_dt + timedelta(hours=self.dws_calendar_duration_hours)
         else:
-            end_time = datetime.now(timezone.utc) + timedelta(hours=self.dws_calendar_duration_hours + 1)
-            end_str = end_time.strftime("%Y-%m-%dT%H:%M:%SZ")
+            end_dt = start_dt + timedelta(hours=self.dws_calendar_duration_hours)
+
+        # Enforce GCP's mandatory 87-hour minimum lead time for GPU DWS Calendar Mode
+        if start_dt < now_utc + timedelta(hours=87, minutes=15):
+            req_duration = max(end_dt - start_dt, timedelta(hours=max(24, self.dws_calendar_duration_hours)))
+            start_dt = min_gpu_start
+            end_dt = start_dt + req_duration
+            await self.emit("info",
+                f"ℹ️ Adjusted GPU DWS Calendar start time to {start_dt.strftime('%Y-%m-%dT%H:%M:%SZ')} "
+                "to satisfy GCP's mandatory 87-hour minimum lead time.")
+
+        start_str = start_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        end_str = end_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
         await self.emit("action",
             f"📡 Creating DWS Calendar future reservation '{res_name}' in {zone} "
@@ -691,8 +767,10 @@ class ScanningSession:
                             return False
                     return False
                 else:
+                    err_msg = self._parse_api_error(data)
+                    self._mark_quota_exhausted(ConsumptionModel.DWS_CALENDAR, zone, err_msg)
                     await self.emit("warning",
-                        f"⚠️ DWS Calendar failed in {zone}: {self._parse_api_error(data)}")
+                        f"⚠️ DWS Calendar failed in {zone}: {err_msg}")
                     return False
         except httpx.TimeoutException:
             await self.emit("warning", f"⚠️ Timeout creating DWS Calendar in {zone}")
@@ -811,6 +889,7 @@ class ScanningSession:
                             f"trying future reservation approach...")
                         return await self._try_dws_flex_via_future(
                             zone, name_prefix, flex_usage_duration_hours=flex_usage_duration_hours)
+                    self._mark_quota_exhausted(ConsumptionModel.DWS_FLEX, zone, err_msg)
                     await self.emit("warning",
                         f"⚠️ [DWS Flex] {zone}: {err_msg}")
                     return False
@@ -883,8 +962,10 @@ class ScanningSession:
                             return False
                     return False
                 else:
+                    err_msg = self._parse_api_error(data)
+                    self._mark_quota_exhausted(ConsumptionModel.DWS_FLEX, zone, err_msg)
                     await self.emit("warning",
-                        f"⚠️ DWS Flex (future) failed in {zone}: {self._parse_api_error(data)}")
+                        f"⚠️ DWS Flex (future) failed in {zone}: {err_msg}")
                     return False
         except httpx.TimeoutException:
             await self.emit("warning", f"⚠️ Timeout creating DWS Flex future reservation in {zone}")
@@ -1155,10 +1236,11 @@ class ScanningSession:
                                 f"⚠️ Spot VM operation not verified for {inst_name}")
                     else:
                         err_msg = self._parse_api_error(data)
+                        self._mark_quota_exhausted(ConsumptionModel.SPOT, zone, err_msg)
                         await self.emit("warning",
                             f"⚠️ Spot VM failed in {zone}: {err_msg}")
-                        # For capacity errors, don't try more instances in same zone
-                        if "no capacity" in err_msg.lower() or "stock" in err_msg.lower():
+                        # For capacity or quota errors, don't try more instances in same zone
+                        if "no capacity" in err_msg.lower() or "stock" in err_msg.lower() or "quota" in err_msg.lower():
                             return False
             except httpx.TimeoutException:
                 await self.emit("warning", f"⚠️ Timeout creating Spot VM in {zone}")
@@ -1173,25 +1255,39 @@ class ScanningSession:
 
     # ── TPU-specific methods ───────────────────────────────────────────
 
-    def _get_tpu_accelerator_type(self, zone: str) -> str:
-        """Build the TPU accelerator type string for the TPU API.
-        
-        For v2/v3: machine type name IS the accelerator type (e.g., v2-8, v3-8)
-        For v5e/v5p/v6e: use accelerator_prefix + chip count (e.g., v5litepod-1, v5p-8)
-        """
+    def _get_tpu_total_chips(self) -> int:
+        """Compute total TPU chips across vm_count slices/VMs."""
         tpu_version = self._get_tpu_version()
-        from gpu_data import TPU_TYPES
         tpu_info = TPU_TYPES.get(tpu_version, {})
         mt_spec = tpu_info.get("machine_types", {}).get(self.machine_type, {})
-        
-        # For older TPUs (v2, v3), the machine type name IS the accelerator type
+        chips_per_vm = mt_spec.get("chips", 1)
+        return chips_per_vm * max(1, int(self.vm_count))
+
+    def _get_tpu_accelerator_type(self, zone: str) -> str:
+        """Build the TPU accelerator type string for the TPU API.
+
+        Multiplies per-machine-type chip count by self.vm_count so multi-host TPU
+        slices request the full topology instead of a single VM's chip count.
+        """
+        tpu_version = self._get_tpu_version()
+        tpu_info = TPU_TYPES.get(tpu_version, {})
+        total_chips = self._get_tpu_total_chips()
+
+        # For older TPUs (v2, v3), when vm_count == 1 the machine type name IS the accelerator type
         if tpu_version in ("v2", "v3"):
-            return self.machine_type  # e.g., "v2-8", "v3-8"
-        
-        # For newer TPUs, use accelerator_prefix + chip count
-        chips = mt_spec.get("chips", 1)
+            if int(self.vm_count) <= 1:
+                return self.machine_type  # e.g., "v2-8", "v3-8"
+            return f"{tpu_version}-{total_chips}"
+
+        # For newer TPUs, use accelerator_prefix + total chip count
         prefix = tpu_info.get("accelerator_prefix", tpu_version)
-        return f"{prefix}-{chips}"
+        return f"{prefix}-{total_chips}"
+
+    def _get_tpu_runtime_version(self) -> str:
+        """Return the generation-appropriate Cloud TPU runtime version."""
+        tpu_version = self._get_tpu_version()
+        tpu_info = TPU_TYPES.get(tpu_version, {})
+        return tpu_info.get("runtime_version", "tpu-vm-tf-2.17.0-pjrt")
 
     async def _poll_tpu_operation(self, op_name: str, zone: str, label: str,
                                    max_polls: int = 60, poll_interval: int = 10) -> bool:
@@ -1229,15 +1325,16 @@ class ScanningSession:
         node_name = self._make_name(name_prefix, "tpu-od", zone)
         token = await self._get_token()
         accel_type = self._get_tpu_accelerator_type(zone)
+        runtime_version = self._get_tpu_runtime_version()
 
         await self.emit("action",
-            f"📡 [TPU] Creating on-demand TPU node '{node_name}' ({accel_type}) in {zone}...")
+            f"📡 [TPU] Creating on-demand TPU node '{node_name}' ({accel_type}, runtime: {runtime_version}) in {zone}...")
 
         url = (f"https://tpu.googleapis.com/v2/projects/{self.project}"
                f"/locations/{zone}/nodes?nodeId={node_name}")
         body = {
             "acceleratorType": accel_type,
-            "runtimeVersion": "tpu-vm-tf-2.17.0-pjrt",
+            "runtimeVersion": runtime_version,
             "labels": self._tracking_labels("on-demand"),
         }
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
@@ -1263,7 +1360,8 @@ class ScanningSession:
                             f"⚠️ TPU On-Demand: No operation returned. Cannot verify deployment.")
                         return False
                 else:
-                    err_msg = data.get("error", {}).get("message", str(data)[:200])
+                    err_msg = self._parse_api_error(data)
+                    self._mark_quota_exhausted(ConsumptionModel.ON_DEMAND, zone, err_msg)
                     await self.emit("warning",
                         f"⚠️ TPU On-Demand failed in {zone}: {err_msg}")
                     return False
@@ -1319,12 +1417,13 @@ class ScanningSession:
         qr_name = self._make_name(name_prefix, "tpu-qr", zone)
         token = await self._get_token()
         accel_type = self._get_tpu_accelerator_type(zone)
+        runtime_version = self._get_tpu_runtime_version()
         net_cfg = await self._get_tpu_network_config(token, zone)
 
         wait_secs = flex_max_wait_hours * 3600
 
         await self.emit("action",
-            f"📡 [TPU] Creating Queued Resource '{qr_name}' ({accel_type}) in {zone} "
+            f"📡 [TPU] Creating Queued Resource '{qr_name}' ({accel_type}, runtime: {runtime_version}) in {zone} "
             f"(DWS Flex, max wait: {flex_max_wait_hours}h, usage: {flex_usage_duration_hours}h)...")
 
         url = (f"https://tpu.googleapis.com/v2/projects/{self.project}"
@@ -1335,7 +1434,7 @@ class ScanningSession:
                     "parent": f"projects/{self.project}/locations/{zone}",
                     "node": {
                         "acceleratorType": accel_type,
-                        "runtimeVersion": "tpu-vm-tf-2.17.0-pjrt",
+                        "runtimeVersion": runtime_version,
                         "labels": self._tracking_labels("dws-flex"),
                         "networkConfig": net_cfg,
                     },
@@ -1369,7 +1468,8 @@ class ScanningSession:
                             "Not yet active — continuing to try other options...")
                         return False
                 else:
-                    err_msg = data.get("error", {}).get("message", str(data)[:200])
+                    err_msg = self._parse_api_error(data)
+                    self._mark_quota_exhausted(ConsumptionModel.DWS_FLEX, zone, err_msg)
                     await self.emit("warning",
                         f"⚠️ TPU Queued Resource failed in {zone}: {err_msg}")
                     return False
@@ -1380,52 +1480,87 @@ class ScanningSession:
     async def _try_tpu_dws_calendar(self, zone: str, name_prefix: str = "",
                                      calendar_start_time: str = "",
                                      calendar_end_time: str = "") -> bool:
-        """Create a TPU Queued Resource with guaranteed scheduling (DWS Calendar)."""
-        qr_name = self._make_name(name_prefix, "tpu-cal", zone)
+        """Create a Compute Engine Future Reservation in CALENDAR mode for Cloud TPUs.
+
+        DWS Calendar Mode for TPUs uses Compute Engine Future Reservations with
+        `reservationMode: "CALENDAR"`, `deploymentType: "DENSE"`, and `aggregateReservation`
+        (specifying the TPU `vmFamily` and total `acceleratorCount`), and requires at
+        least a 6-hour lead time prior to `startTime`.
+        """
+        tpu_version = self._get_tpu_version()
+        vm_family = TPU_CALENDAR_VM_FAMILY.get(tpu_version)
+        if not vm_family:
+            await self.emit("warning",
+                f"⚠️ TPU DWS Calendar Mode is not supported for TPU {tpu_version} "
+                f"(supported generations: {', '.join(TPU_CALENDAR_VM_FAMILY.keys())}).")
+            return False
+
+        fr_name = self._make_name(name_prefix, "tpu-cal", zone)
         token = await self._get_token()
-        accel_type = self._get_tpu_accelerator_type(zone)
-        net_cfg = await self._get_tpu_network_config(token, zone)
+        total_chips = self._get_tpu_total_chips()
+
+        now_utc = datetime.now(timezone.utc)
+        min_tpu_start = (now_utc + timedelta(hours=7)).replace(minute=0, second=0, microsecond=0)
 
         if calendar_start_time:
             start_str = _normalize_datetime(calendar_start_time)
+            try:
+                start_dt = datetime.strptime(start_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            except ValueError:
+                start_dt = min_tpu_start
         else:
-            start_time = datetime.now(timezone.utc) + timedelta(hours=1)
-            start_str = start_time.strftime("%Y-%m-%dT%H:%M:%SZ")
+            start_dt = min_tpu_start
 
         if calendar_end_time:
             end_str = _normalize_datetime(calendar_end_time)
+            try:
+                end_dt = datetime.strptime(end_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            except ValueError:
+                end_dt = start_dt + timedelta(hours=max(24, self.dws_calendar_duration_hours))
         else:
-            end_time = datetime.now(timezone.utc) + timedelta(hours=self.dws_calendar_duration_hours + 1)
-            end_str = end_time.strftime("%Y-%m-%dT%H:%M:%SZ")
+            end_dt = start_dt + timedelta(hours=max(24, self.dws_calendar_duration_hours))
+
+        # Enforce GCP's mandatory 6-hour minimum lead time for TPU DWS Calendar Mode
+        if start_dt < now_utc + timedelta(hours=6, minutes=15):
+            req_duration = max(end_dt - start_dt, timedelta(hours=max(24, self.dws_calendar_duration_hours)))
+            start_dt = min_tpu_start
+            end_dt = start_dt + req_duration
+            await self.emit("info",
+                f"ℹ️ Adjusted TPU DWS Calendar start time to {start_dt.strftime('%Y-%m-%dT%H:%M:%SZ')} "
+                "to satisfy GCP's mandatory 6-hour minimum lead time.")
+
+        start_str = start_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        end_str = end_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
         await self.emit("action",
-            f"📡 [TPU] Creating Calendar Queued Resource '{qr_name}' ({accel_type}) in {zone} "
-            f"({start_str} → {end_str})...")
+            f"📡 [TPU] Creating DWS Calendar Future Reservation '{fr_name}' "
+            f"({total_chips}x {tpu_version} chips, {vm_family}) in {zone} ({start_str} → {end_str})...")
 
-        url = (f"https://tpu.googleapis.com/v2/projects/{self.project}"
-               f"/locations/{zone}/queuedResources?queuedResourceId={qr_name}")
+        url = (f"https://compute.googleapis.com/compute/beta/projects/{self.project}"
+               f"/zones/{zone}/futureReservations")
+        prefix_tag = name_prefix if name_prefix else f"gpu-radar-{self.session_id[:8]}"
         body = {
-            "tpu": {
-                "nodeSpec": [{
-                    "parent": f"projects/{self.project}/locations/{zone}",
-                    "node": {
-                        "acceleratorType": accel_type,
-                        "runtimeVersion": "tpu-vm-tf-2.17.0-pjrt",
-                        "labels": self._tracking_labels("dws-calendar"),
-                        "networkConfig": net_cfg,
-                    },
-                    "nodeId": f"{qr_name}-node",
-                }]
+            "name": fr_name,
+            "reservationMode": "CALENDAR",
+            "planningStatus": "SUBMITTED",
+            "deploymentType": "DENSE",
+            "specificReservationRequired": True,
+            "autoDeleteAutoCreatedReservations": True,
+            "namePrefix": prefix_tag,
+            "timeWindow": {
+                "startTime": start_str,
+                "endTime": end_str,
             },
-            "queueingPolicy": {
-                "validUntilTime": end_str,
-            },
-            "guaranteed": {
-                # The TPU v2 QueuedResource `Guaranteed` schema only supports
-                # `minDuration` (a google-duration string). There is no
-                # `reserved` field — sending it causes:
-                #   Unknown name "reserved" at 'queued_resource.guaranteed'
-                "minDuration": f"{self.dws_calendar_duration_hours * 3600}s",
+            "aggregateReservation": {
+                "vmFamily": vm_family,
+                "workloadType": "BATCH",
+                "reservedResources": [
+                    {
+                        "accelerator": {
+                            "acceleratorCount": total_chips,
+                        }
+                    }
+                ],
             },
         }
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
@@ -1435,28 +1570,35 @@ class ScanningSession:
                 resp = await client.post(url, json=body, headers=headers)
                 data = resp.json()
                 if resp.status_code in (200, 201):
-                    ready = await self._poll_tpu_queued_resource(
-                        zone, qr_name, "TPU Calendar")
-                    if ready:
-                        self.result = {"method": "dws_calendar", "queued_resource": qr_name,
-                                       "zone": zone, "accelerator_type": accel_type,
-                                       "start_time": start_str, "end_time": end_str}
-                        self._log_deployment_event("dws_calendar", zone, qr_name, True, "tpu_queued_resource")
-                        await self.emit("info",
-                            f"✅ TPU Calendar resource ACTIVE: {qr_name} ({accel_type}) in {zone}")
-                        return True
-                    else:
-                        await self.emit("info",
-                            f"📋 TPU Calendar submitted in {zone}: {qr_name}. "
-                            "Pending — not yet deployed. Continuing to try other options...")
-                        return False
+                    verified = await self._wait_for_operation(data, zone, "TPU Calendar")
+                    if verified:
+                        approved = await self._poll_future_reservation_status(
+                            zone, fr_name, max_polls=60, poll_interval=10)
+                        if approved:
+                            self.result = {"method": "dws_calendar", "reservation_name": fr_name,
+                                           "zone": zone, "vm_count": self.vm_count,
+                                           "chips": total_chips, "vm_family": vm_family,
+                                           "start_time": start_str, "end_time": end_str}
+                            self._log_deployment_event("dws_calendar", zone, fr_name, True, "future_reservation")
+                            await self.emit("info",
+                                f"✅ TPU Calendar Future Reservation APPROVED: {fr_name} ({total_chips} chips) in {zone}")
+                            return True
+                        else:
+                            self._log_deployment_event("dws_calendar", zone, fr_name, False, "future_reservation",
+                                                       {"status": "pending_approval"})
+                            await self.emit("info",
+                                f"📋 TPU Calendar Future Reservation submitted in {zone}: {fr_name}. "
+                                "Pending approval — continuing to try other options...")
+                            return False
+                    return False
                 else:
-                    err_msg = data.get("error", {}).get("message", str(data)[:200])
+                    err_msg = self._parse_api_error(data)
+                    self._mark_quota_exhausted(ConsumptionModel.DWS_CALENDAR, zone, err_msg)
                     await self.emit("warning",
                         f"⚠️ TPU Calendar failed in {zone}: {err_msg}")
                     return False
         except httpx.TimeoutException:
-            await self.emit("warning", f"⚠️ Timeout creating TPU Calendar resource in {zone}")
+            await self.emit("warning", f"⚠️ Timeout creating TPU Calendar Future Reservation in {zone}")
             return False
 
     async def _try_tpu_spot(self, zone: str, name_prefix: str = "") -> bool:
@@ -1464,10 +1606,11 @@ class ScanningSession:
         qr_name = self._make_name(name_prefix, "tpu-spot", zone)
         token = await self._get_token()
         accel_type = self._get_tpu_accelerator_type(zone)
+        runtime_version = self._get_tpu_runtime_version()
         net_cfg = await self._get_tpu_network_config(token, zone)
 
         await self.emit("action",
-            f"📡 [TPU] Creating Spot TPU '{qr_name}' ({accel_type}) in {zone}...")
+            f"📡 [TPU] Creating Spot TPU '{qr_name}' ({accel_type}, runtime: {runtime_version}) in {zone}...")
 
         url = (f"https://tpu.googleapis.com/v2/projects/{self.project}"
                f"/locations/{zone}/queuedResources?queuedResourceId={qr_name}")
@@ -1477,7 +1620,7 @@ class ScanningSession:
                     "parent": f"projects/{self.project}/locations/{zone}",
                     "node": {
                         "acceleratorType": accel_type,
-                        "runtimeVersion": "tpu-vm-tf-2.17.0-pjrt",
+                        "runtimeVersion": runtime_version,
                         "labels": self._tracking_labels("spot"),
                         "networkConfig": net_cfg,
                     },
@@ -1508,7 +1651,8 @@ class ScanningSession:
                             "Not yet active — continuing to try other options...")
                         return False
                 else:
-                    err_msg = data.get("error", {}).get("message", str(data)[:200])
+                    err_msg = self._parse_api_error(data)
+                    self._mark_quota_exhausted(ConsumptionModel.SPOT, zone, err_msg)
                     await self.emit("warning",
                         f"⚠️ Spot TPU failed in {zone}: {err_msg}")
                     return False
@@ -1525,14 +1669,15 @@ class ScanningSession:
         if not message and errors:
             message = errors[0].get("message", "Unknown error")
         ml = message.lower()
-        if code == 403:
-            return f"Permission denied ({code}). Check IAM permissions."
+        has_quota_reason = any(e.get("reason") in ("quotaExceeded", "rateLimitExceeded") for e in errors)
+        if "quota" in ml or has_quota_reason:
+            return f"Quota exceeded ({code}). ({message[:200]})"
+        elif code == 403:
+            return f"Permission denied ({code}). Check IAM permissions. ({message[:150]})"
         elif code == 404:
             return f"Not found ({code}). Resource or API doesn't exist."
         elif code == 409:
             return f"Conflict ({code}). Resource may already exist."
-        elif "quota" in ml:
-            return f"Quota exceeded. ({message[:150]})"
         elif "zone does not have enough resources" in ml or "stockout" in ml:
             return "No capacity — zone out of stock."
         elif "not found" in ml and "machine" in ml:

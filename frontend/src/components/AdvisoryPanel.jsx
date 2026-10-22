@@ -21,7 +21,7 @@ import WarningAmberIcon from '@mui/icons-material/WarningAmber'
 import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline'
 
 export default function AdvisoryPanel({ machineTypes = [], loading: mtLoading, project = '', userToken = '' }) {
-  const authHeaders = userToken ? { Authorization: `Bearer ${userToken}` } : {}
+  const authHeaders = userToken ? { 'X-User-Token': userToken } : {}
   // Shared config
   const [category, setCategory] = useState('GPU')
   const [chip, setChip] = useState('')
@@ -35,7 +35,7 @@ export default function AdvisoryPanel({ machineTypes = [], loading: mtLoading, p
     const d = new Date(); d.setDate(d.getDate() + 1)
     return d.toISOString().split('T')[0]
   })
-  const [flexibilityDays, setFlexibilityDays] = useState(0)
+  const [flexibilityDays, setFlexibilityDays] = useState(3)
 
   // Flex-specific params (all adjustable)
   const [flexSize, setFlexSize] = useState(1)
@@ -357,6 +357,8 @@ export default function AdvisoryPanel({ machineTypes = [], loading: mtLoading, p
                       <MenuItem value={1}>+/- 1 day</MenuItem>
                       <MenuItem value={2}>+/- 2 days</MenuItem>
                       <MenuItem value={3}>+/- 3 days</MenuItem>
+                      <MenuItem value={7}>+/- 7 days</MenuItem>
+                      <MenuItem value={14}>+/- 14 days</MenuItem>
                     </TextField>
                   </Grid>
                 </Grid>

@@ -69,6 +69,9 @@ export default function App() {
       setLoading(false)
       if (config.authMode) setAuthMode(config.authMode)
       if (config.oauthClientId) setOauthClientId(config.oauthClientId)
+      if (config.project && !config.demoMode) {
+        setProjectInput(config.project)
+      }
       if (config.authMode === 'user' && sessionStorage.getItem('cr_user_token')) {
         setLoginSuccess(true)
         setSignedInEmail(sessionStorage.getItem('cr_user_email') || '')
@@ -359,9 +362,9 @@ export default function App() {
                   </Typography>
                   <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 0.75 }}>
                     <code style={{ background: '#f1f3f4', padding: '2px 6px', borderRadius: 3, fontSize: '0.62rem', flex: 1 }}>
-                      gcloud auth print-access-token
+                      gcloud auth application-default print-access-token
                     </code>
-                    <IconButton size="small" onClick={() => copyCmd('gcloud auth print-access-token')} sx={{ p: 0.2 }}>
+                    <IconButton size="small" onClick={() => copyCmd('gcloud auth application-default print-access-token')} sx={{ p: 0.2 }}>
                       <ContentCopyIcon sx={{ fontSize: 12 }} />
                     </IconButton>
                   </Box>

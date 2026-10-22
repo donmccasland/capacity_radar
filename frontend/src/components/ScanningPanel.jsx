@@ -65,7 +65,7 @@ function stripEmojis(text) {
 
 export default function ScanningPanel({ machineTypes = [], loading: mtLoading, project = '', userToken = '' }) {
 
-  const authHeaders = userToken ? { Authorization: `Bearer ${userToken}` } : {}
+  const authHeaders = userToken ? { 'X-User-Token': userToken } : {}
 
   const [category, setCategory] = useState('GPU')
   const [chip, setChip] = useState('')
