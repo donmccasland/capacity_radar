@@ -1702,14 +1702,14 @@ class ScanningSession:
         else:
             end_dt = start_dt + timedelta(hours=max(24, self.dws_calendar_duration_hours))
 
-        # Enforce GCP's mandatory 6-hour minimum lead time for TPU DWS Calendar Mode
-        if start_dt < now_utc + timedelta(hours=6, minutes=15):
+        # Enforce GCP's mandatory minimum lead time (1h min_ahead_hours + 15m buffer) for TPU DWS Calendar Mode
+        if start_dt < now_utc + timedelta(hours=1, minutes=15):
             req_duration = max(end_dt - start_dt, timedelta(hours=max(24, self.dws_calendar_duration_hours)))
             start_dt = min_tpu_start
             end_dt = start_dt + req_duration
             await self.emit("info",
                 f"ℹ️ Adjusted TPU DWS Calendar start time to {start_dt.strftime('%Y-%m-%dT%H:%M:%SZ')} "
-                "to satisfy GCP's mandatory 6-hour minimum lead time.")
+                "to satisfy GCP's mandatory minimum lead time.")
 
         start_str = start_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
         end_str = end_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1722,6 +1722,22 @@ class ScanningSession:
                f"/zones/{zone}/futureReservations")
         prefix_tag = name_prefix if name_prefix else f"gpu-radar-{self.session_id[:8]}"
         rsv_name = f"{prefix_tag}-rsv"[:38].rstrip("-")
+        agg_reservation = {
+            "vmFamily": vm_family,
+            "reservedResources": [
+                {
+                    "accelerator": {
+                        "acceleratorCount": total_chips,
+                    }
+                }
+            ],
+        }
+        # Per GCE aggregate_reservation_configs.textproto:
+        # - CT6E (v6e) only supports WorkloadType UNSPECIFIED (omit workloadType).
+        # - CT5LP (v5e) requires workloadType: SERVING for 1..8 chips, BATCH for >=16 chips.
+        if vm_family == "VM_FAMILY_CLOUD_TPU_LITE_POD_SLICE_CT5LP":
+            agg_reservation["workloadType"] = "BATCH" if total_chips >= 16 else "SERVING"
+
         body = {
             "name": fr_name,
             "reservationMode": "CALENDAR",
@@ -1734,17 +1750,7 @@ class ScanningSession:
                 "startTime": start_str,
                 "endTime": end_str,
             },
-            "aggregateReservation": {
-                "vmFamily": vm_family,
-                "workloadType": "BATCH",
-                "reservedResources": [
-                    {
-                        "accelerator": {
-                            "acceleratorCount": total_chips,
-                        }
-                    }
-                ],
-            },
+            "aggregateReservation": agg_reservation,
         }
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 

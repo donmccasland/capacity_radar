@@ -317,12 +317,16 @@ async def _query_calendar_advisory_region(
             f"/regions/{region}/advice/calendarMode"
         )
         total_chips = max(1, int(vm_count)) * int(tpu_info["chips"])
+        vm_family = TPU_CALENDAR_VM_FAMILY[tpu_info["gen"]]
+        agg_resources = {
+            "acceleratorCount": str(total_chips),
+            "vmFamily": vm_family,
+        }
+        # Only CT5LP (v5e) requires workloadType; CT6E (v6e) only supports UNSPECIFIED in FutureReservations
+        if vm_family == "VM_FAMILY_CLOUD_TPU_LITE_POD_SLICE_CT5LP":
+            agg_resources["workloadType"] = "BATCH" if total_chips >= 16 else "SERVING"
         target_resources = {
-            "aggregateResources": {
-                "acceleratorCount": str(total_chips),
-                "vmFamily": TPU_CALENDAR_VM_FAMILY[tpu_info["gen"]],
-                "workloadType": "BATCH",
-            }
+            "aggregateResources": agg_resources,
         }
         logger.info(
             f"TPU Calendar Advisory: {machine_type} "
