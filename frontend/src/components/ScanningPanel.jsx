@@ -70,7 +70,7 @@ function toUtcDatetimeLocal(isoStr) {
   return d.toISOString().slice(0, 16)
 }
 
-export default function ScanningPanel({ machineTypes = [], loading: mtLoading, project = '', userToken = '', deployPreset = null }) {
+export default function ScanningPanel({ machineTypes = [], loading: mtLoading, project = '', userToken = '', deployPreset = null, onContextChange }) {
 
   const authHeaders = userToken ? { 'X-User-Token': userToken } : {}
 
@@ -93,19 +93,35 @@ export default function ScanningPanel({ machineTypes = [], loading: mtLoading, p
     const count = Math.max(1, parseInt(deployPreset.vmCount) || 1)
     setMinVmCount(count)
     setMaxVmCount(count)
+    if (deployPreset.executionMode) setExecutionMode(deployPreset.executionMode)
     const method = deployPreset.method || 'dws_calendar'
     const startLocal = toUtcDatetimeLocal(deployPreset.startTime)
     const endLocal = toUtcDatetimeLocal(deployPreset.endTime)
     const flexUsageHours = Math.max(1, parseInt(deployPreset.flexUsageDurationHours) || 24)
     const zones = Array.isArray(deployPreset.zones) ? deployPreset.zones.filter(Boolean) : []
-    setPriorities([{
-      ...DEFAULT_PRIORITY,
-      method,
-      zones,
-      calendarStartTime: startLocal,
-      calendarEndTime: endLocal,
-      flexUsageDurationHours: flexUsageHours,
-    }])
+    if (Array.isArray(deployPreset.priorities) && deployPreset.priorities.length > 0) {
+      setPriorities(
+        deployPreset.priorities.map((p) => ({
+          ...DEFAULT_PRIORITY,
+          method: p.method || 'spot',
+          zones: Array.isArray(p.zones) ? p.zones.filter(Boolean) : [],
+          max_retries: parseInt(p.max_retries) || 5,
+          retry_interval: parseInt(p.retry_interval) || 60,
+          calendarStartTime: toUtcDatetimeLocal(p.calendarStartTime) || startLocal,
+          calendarEndTime: toUtcDatetimeLocal(p.calendarEndTime) || endLocal,
+          flexUsageDurationHours: Math.max(1, parseInt(p.flexUsageDurationHours) || flexUsageHours),
+        }))
+      )
+    } else {
+      setPriorities([{
+        ...DEFAULT_PRIORITY,
+        method,
+        zones,
+        calendarStartTime: startLocal,
+        calendarEndTime: endLocal,
+        flexUsageDurationHours: flexUsageHours,
+      }])
+    }
     const sourceLabel =
       deployPreset.sourceLabel ||
       (method === 'spot'
@@ -145,6 +161,42 @@ export default function ScanningPanel({ machineTypes = [], loading: mtLoading, p
   const [progress, setProgress] = useState(0)
   const wsRef = useRef(null)
   const logContainerRef = useRef(null)
+
+  // Report live Scan & Deploy state and recent logs to the AI Assistant
+  useEffect(() => {
+    if (!onContextChange) return
+    onContextChange({
+      category,
+      chip,
+      machineType,
+      minVmCount,
+      maxVmCount,
+      executionMode,
+      priorities,
+      scanning,
+      status: scanStatus,
+      sessionId,
+      recentLogs: logs.slice(-25).map((l) => ({
+        type: l.type,
+        message: l.message,
+        zone: l.zone,
+        method: l.method,
+      })),
+    })
+  }, [
+    onContextChange,
+    category,
+    chip,
+    machineType,
+    minVmCount,
+    maxVmCount,
+    executionMode,
+    priorities,
+    scanning,
+    scanStatus,
+    sessionId,
+    logs,
+  ])
 
   // Machine type info
   const selectedMachineInfo = useMemo(() => {

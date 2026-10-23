@@ -14,8 +14,9 @@ WORKDIR /app
 COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy backend code
+# Copy backend code and agent skills
 COPY backend/ ./backend/
+COPY skills/ ./skills/
 
 # Copy built frontend from stage 1
 COPY --from=frontend-build /app/frontend/dist/ ./frontend/dist/

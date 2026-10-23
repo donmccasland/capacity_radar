@@ -27,7 +27,7 @@ const CONSUMPTION_META = {
   committed: { label: 'Committed (CUD)', color: '#5f6368', bg: '#f1f3f4' },
 }
 
-export default function QuotaPanel({ project, userToken }) {
+export default function QuotaPanel({ project, userToken, quotaPreset = null, onContextChange }) {
   const [quotas, setQuotas] = useState([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
@@ -76,6 +76,19 @@ export default function QuotaPanel({ project, userToken }) {
       fetchQuotas(false)
     }
   }, [project, fetchQuotas])
+
+  // Apply agent-driven filter preset when the AI Assistant filters the Quota tab
+  useEffect(() => {
+    if (!quotaPreset) return
+    if (quotaPreset.category) setCategoryFilter(quotaPreset.category)
+    if (Array.isArray(quotaPreset.chips)) setSelectedChips(quotaPreset.chips)
+    if (Array.isArray(quotaPreset.families)) setSelectedFamilies(quotaPreset.families)
+    if (Array.isArray(quotaPreset.models)) setSelectedModels(quotaPreset.models)
+    if (quotaPreset.location !== undefined) setLocationFilter(quotaPreset.location || '')
+    if (quotaPreset.search !== undefined) setSearchQuery(quotaPreset.search || '')
+    if (typeof quotaPreset.showVmQuotas === 'boolean') setShowVmQuotas(quotaPreset.showVmQuotas)
+    if (typeof quotaPreset.onlyNonZero === 'boolean') setOnlyNonZero(quotaPreset.onlyNonZero)
+  }, [quotaPreset])
 
   // Distinct filter options derived from catalog
   const availableChips = useMemo(() => {
@@ -187,6 +200,43 @@ export default function QuotaPanel({ project, userToken }) {
     onlyNonZero,
     locationFilter,
     searchQuery,
+  ])
+
+  // Report live Quota tab state & visible quotas to the AI Assistant
+  useEffect(() => {
+    if (!onContextChange) return
+    onContextChange({
+      categoryFilter,
+      selectedChips,
+      selectedFamilies,
+      selectedModels,
+      locationFilter,
+      searchQuery,
+      showVmQuotas,
+      onlyNonZero,
+      totalLoaded: quotas.length,
+      filteredCount: filteredQuotas.length,
+      visibleQuotas: filteredQuotas.slice(0, 20).map((q) => ({
+        id: q.id,
+        displayName: q.displayName,
+        chip: q.chip,
+        consumptionModels: q.consumptionModels,
+        maxLimit: q.maxLimit,
+        nonZeroLocations: (q.locations || []).filter((l) => (l.limit || 0) > 0).slice(0, 8),
+      })),
+    })
+  }, [
+    onContextChange,
+    categoryFilter,
+    selectedChips,
+    selectedFamilies,
+    selectedModels,
+    locationFilter,
+    searchQuery,
+    showVmQuotas,
+    onlyNonZero,
+    quotas,
+    filteredQuotas,
   ])
 
   // Group filtered quotas by Category + Chip

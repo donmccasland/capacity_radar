@@ -19,9 +19,11 @@ import LinkIcon from '@mui/icons-material/Link'
 import MenuIcon from '@mui/icons-material/Menu'
 import ChevronLeftIcon from '@mui/icons-material/ChevronLeft'
 import SpeedIcon from '@mui/icons-material/Speed'
+import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome'
 import AdvisoryPanel from './components/AdvisoryPanel'
 import ScanningPanel from './components/ScanningPanel'
 import QuotaPanel from './components/QuotaPanel'
+import ChatAssistant from './components/ChatAssistant'
 
 const DRAWER_WIDTH = 290
 
@@ -60,11 +62,31 @@ export default function App() {
   const [tokenInput, setTokenInput] = useState('')
   const [userToken, setUserToken] = useState(() => sessionStorage.getItem('cr_user_token') || '')
   const [deployPreset, setDeployPreset] = useState(null)
+  const [advisoryPreset, setAdvisoryPreset] = useState(null)
+  const [quotaPreset, setQuotaPreset] = useState(null)
+  const [chatOpen, setChatOpen] = useState(false)
+  const [advisoryContext, setAdvisoryContext] = useState(null)
+  const [scanContext, setScanContext] = useState(null)
+  const [quotaContext, setQuotaContext] = useState(null)
   const projectInputRef = useRef('')
 
   const handleDeployFromAdvisory = useCallback((preset) => {
     setDeployPreset({ ...preset, _ts: Date.now() })
     setTab(1)
+  }, [])
+
+  const handleAgentUiAction = useCallback((action) => {
+    if (!action || typeof action !== 'object') return
+    if (typeof action.tab === 'number') {
+      setTab(action.tab)
+    }
+    if (action.type === 'update_advisory') {
+      setAdvisoryPreset({ ...action, _ts: Date.now() })
+    } else if (action.type === 'configure_scan' && action.deployPreset) {
+      setDeployPreset({ ...action.deployPreset, _ts: Date.now() })
+    } else if (action.type === 'filter_quotas') {
+      setQuotaPreset({ ...action, _ts: Date.now() })
+    }
   }, [])
 
   useEffect(() => {
@@ -233,6 +255,30 @@ export default function App() {
             </Typography>
           </Box>
           <Box sx={{ flexGrow: 1 }} />
+          <Button
+            size="small"
+            variant={chatOpen ? 'contained' : 'outlined'}
+            startIcon={<AutoAwesomeIcon sx={{ fontSize: 15 }} />}
+            onClick={() => setChatOpen(prev => !prev)}
+            sx={{
+              mr: 1.5,
+              textTransform: 'none',
+              fontSize: '0.75rem',
+              fontWeight: 600,
+              height: 28,
+              ...(chatOpen
+                ? {
+                    background: 'linear-gradient(135deg, #1a73e8 0%, #7b1fa2 100%)',
+                    color: '#fff',
+                  }
+                : {
+                    borderColor: '#1a73e8',
+                    color: '#1a73e8',
+                  }),
+            }}
+          >
+            {chatOpen ? 'AI Assistant Open' : 'Ask Radar AI'}
+          </Button>
           {demoMode && (
             <Chip label="☁️ Demo Mode" size="small" onClick={() => setDemoDialogOpen(true)}
               sx={{ height: 24, fontSize: '0.68rem', bgcolor: '#e8f0fe', color: '#1a73e8', fontWeight: 600, mr: 1, cursor: 'pointer', '&:hover': { bgcolor: '#d2e3fc' } }} />
@@ -564,6 +610,21 @@ export default function App() {
 
         {/* Main Content */}
         <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, transition: 'margin 0.3s' }}>
+          {/* Collapsible AI Capacity Assistant Panel above the Tabs */}
+          <ChatAssistant
+            open={chatOpen}
+            onToggle={() => setChatOpen(prev => !prev)}
+            project={project}
+            userToken={userToken}
+            activeTab={tab}
+            uiContext={{
+              advisory: advisoryContext,
+              scan: scanContext,
+              quota: quotaContext,
+            }}
+            onUiAction={handleAgentUiAction}
+          />
+
           {/* Tabs */}
           <Box sx={{ bgcolor: '#fff', borderBottom: 1, borderColor: 'divider', px: 3 }}>
             <Tabs
@@ -613,6 +674,8 @@ export default function App() {
                   project={project}
                   userToken={userToken}
                   onDeployRecommendation={handleDeployFromAdvisory}
+                  advisoryPreset={advisoryPreset}
+                  onContextChange={setAdvisoryContext}
                 />
               </TabPanel>
               <TabPanel value={tab} index={1}>
@@ -622,12 +685,15 @@ export default function App() {
                   project={project}
                   userToken={userToken}
                   deployPreset={deployPreset}
+                  onContextChange={setScanContext}
                 />
               </TabPanel>
               <TabPanel value={tab} index={2}>
                 <QuotaPanel
                   project={project}
                   userToken={userToken}
+                  quotaPreset={quotaPreset}
+                  onContextChange={setQuotaContext}
                 />
               </TabPanel>
             </Container>

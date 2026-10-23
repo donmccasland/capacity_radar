@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from gpu_data import get_all_machine_types_info, get_zones_for_machine_type, MACHINE_TYPES, get_chip_groups, TPU_TYPES
 from advisory import get_calendar_advisory, get_spot_advisory, find_best_splits, get_flex_advisory
 from quotas import get_project_quotas
+from agent import run_agent_chat, AVAILABLE_MODELS, DEFAULT_MODEL
 from hunter import (
     create_session, cancel_session, get_session,
     active_sessions, ConsumptionModel, ScanningStatus,
@@ -355,6 +356,38 @@ async def list_project_quotas(request: Request, project: str = "", refresh: bool
         return await get_project_quotas(project=project, user_token=user_token, refresh=refresh)
     except Exception as e:
         logger.error(f"Quotas fetch error for project '{project}': {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class ChatRequest(BaseModel):
+    project: str = ""
+    messages: list[dict] = Field(default_factory=list)
+    uiContext: Optional[dict] = None
+    model: Optional[str] = None
+
+
+@app.get("/api/chat/models")
+async def list_chat_models():
+    """Return available Gemini 3+ models for the AI Capacity Assistant."""
+    return {"models": AVAILABLE_MODELS, "defaultModel": DEFAULT_MODEL}
+
+
+@app.post("/api/chat")
+async def chat_with_agent(req: ChatRequest, request: Request):
+    """Run the Capacity Radar AI Assistant with live screen context and tool execution."""
+    user_token = _bearer_token(request)
+    if req.project.strip():
+        _require_user_token(user_token)
+    try:
+        return await run_agent_chat(
+            project=req.project.strip(),
+            messages=req.messages,
+            ui_context=req.uiContext,
+            user_token=user_token,
+            model=req.model,
+        )
+    except Exception as e:
+        logger.error(f"Agent chat error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

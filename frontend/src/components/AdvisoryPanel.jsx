@@ -1,5 +1,5 @@
 
-import React, { useState, useMemo } from 'react'
+import React, { useState, useMemo, useEffect } from 'react'
 import {
   Box, Paper, Typography, Grid, TextField, MenuItem, Button,
   Table, TableBody, TableCell, TableContainer, TableHead, TableRow,
@@ -40,7 +40,7 @@ function formatWindowSummary(startTime, endTime) {
   return `${sStr} → ${eStr} UTC (${durLabel})`
 }
 
-export default function AdvisoryPanel({ machineTypes = [], loading: mtLoading, project = '', userToken = '', onDeployRecommendation }) {
+export default function AdvisoryPanel({ machineTypes = [], loading: mtLoading, project = '', userToken = '', onDeployRecommendation, advisoryPreset = null, onContextChange }) {
   const authHeaders = userToken ? { 'X-User-Token': userToken } : {}
   // Shared config
   const [category, setCategory] = useState('GPU')
@@ -81,6 +81,97 @@ export default function AdvisoryPanel({ machineTypes = [], loading: mtLoading, p
   const [flexResults, setFlexResults] = useState(null)
   const [flexLoading, setFlexLoading] = useState(false)
   const [flexError, setFlexError] = useState(null)
+
+  // Apply agent-driven updates when the AI Assistant runs an advisory tool
+  useEffect(() => {
+    if (!advisoryPreset) return
+    if (advisoryPreset.category) setCategory(advisoryPreset.category)
+    if (advisoryPreset.chip) setChip(advisoryPreset.chip)
+    if (advisoryPreset.machineType) setMachineType(advisoryPreset.machineType)
+    if (advisoryPreset.vmCount != null) setVmCount(advisoryPreset.vmCount)
+    if (advisoryPreset.startDate) setStartDate(advisoryPreset.startDate)
+    if (advisoryPreset.durationDays != null) setDurationDays(advisoryPreset.durationDays)
+    if (advisoryPreset.flexibilityDays != null) setFlexibilityDays(advisoryPreset.flexibilityDays)
+    if (advisoryPreset.flexSize != null) setFlexSize(advisoryPreset.flexSize)
+    if (advisoryPreset.flexMaxRunHours != null) setFlexMaxRunHours(advisoryPreset.flexMaxRunHours)
+    if (advisoryPreset.calendarQueryInfo) setCalendarQueryInfo(advisoryPreset.calendarQueryInfo)
+    if (advisoryPreset.calendarResults !== undefined) {
+      setCalendarResults(advisoryPreset.calendarResults)
+      setSplitsResults(null)
+      setCalendarError(null)
+    }
+    if (advisoryPreset.splitsResults !== undefined) {
+      setSplitsResults(advisoryPreset.splitsResults)
+      setCalendarResults(null)
+      setSplitsError(null)
+    }
+    if (advisoryPreset.spotResults !== undefined) {
+      setSpotResults(advisoryPreset.spotResults)
+      setSpotError(null)
+    }
+    if (advisoryPreset.flexResults !== undefined) {
+      setFlexResults(advisoryPreset.flexResults)
+      setFlexError(null)
+    }
+  }, [advisoryPreset])
+
+  // Report live tab state & visible results to the AI Assistant
+  useEffect(() => {
+    if (!onContextChange) return
+    onContextChange({
+      category,
+      chip,
+      machineType,
+      selectedZones,
+      vmCount,
+      startDate,
+      durationDays,
+      flexibilityDays,
+      flexSize,
+      flexMaxRunHours,
+      calendarResults: calendarResults
+        ? {
+            recommendations: (calendarResults.recommendations || []).slice(0, 15),
+            unsupportedZones: calendarResults.unsupportedZones || [],
+            errorCount: (calendarResults.errors || []).length,
+          }
+        : null,
+      splitsResults: splitsResults
+        ? {
+            plans: (splitsResults.plans || []).slice(0, 5),
+            singleZoneAvailable: splitsResults.singleZoneAvailable,
+          }
+        : null,
+      spotResults: spotResults
+        ? {
+            scores: (spotResults.scores || []).slice(0, 20),
+            errorCount: (spotResults.errors || []).length,
+          }
+        : null,
+      flexResults: flexResults
+        ? {
+            recommendations: (flexResults.recommendations || []).slice(0, 15),
+            errorCount: (flexResults.errors || []).length,
+          }
+        : null,
+    })
+  }, [
+    onContextChange,
+    category,
+    chip,
+    machineType,
+    selectedZones,
+    vmCount,
+    startDate,
+    durationDays,
+    flexibilityDays,
+    flexSize,
+    flexMaxRunHours,
+    calendarResults,
+    splitsResults,
+    spotResults,
+    flexResults,
+  ])
 
   const selectedMachineInfo = useMemo(() => {
     return machineTypes.find(mt => mt.machineType === machineType)
