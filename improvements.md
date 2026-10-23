@@ -1,8 +1,11 @@
-# Capacity Radar (`MG-Cafe/capacity_radar`) — Proposed Scanning & Advisory Improvements
+# Capacity Radar (`MG-Cafe/capacity_radar`) — Scanning, Advisory, Quota & Agentic Chat Improvements
 
-This document captures actionable engineering improvements for **Capacity Radar**, focusing on:
-1. **Pre-Flight Quota Verification & Fail-Fast Scanning** (preventing scans in `0`-quota regions and surfacing accurate quota diagnostics).
-2. **Cloud TPU Advisory & Scanning Enhancements** (enabling live DWS Calendar Mode Advisories for TPUs, fixing TPU Calendar Mode reservation creation/polling, aligning DWS Flex-Start zone lists with dedicated pool realities, and adding TPU v7x / Ironwood support).
+> **Status Update (2026-10-23):** All improvements documented below — plus the **GPU & TPU Quota Explorer Tab** (`backend/quotas.py`, `QuotaPanel.jsx`), **1-Click Deploy Across All Advisory Cards**, **365-Day DWS Calendar Search Window**, and the **In-App AI Capacity Assistant** (`backend/agent.py`, `ChatAssistant.jsx` powered by Gemini 3 Flash & Gemini 3.1 Pro) — have been implemented on `main`. See [`CHANGELOG.md`](CHANGELOG.md) for full release details.
+
+This document captures the engineering improvements implemented for **Capacity Radar**, focusing on:
+1. **Pre-Flight Quota Verification, Quota Explorer Tab & Fail-Fast Scanning** (preventing scans in `0`-quota regions, surfacing live regional/zonal limits & usage across 51 GPU/TPU/VM metrics, and accurate quota diagnostics).
+2. **Cloud TPU Advisory & Scanning Enhancements** (enabling live DWS Calendar Mode Advisories for TPUs, fixing TPU Calendar Mode reservation creation/polling including `PROCURING`, aligning DWS Flex-Start zone lists with dedicated pool realities, and adding TPU v7x / Ironwood support).
+3. **In-App Agentic Chat Assistant & 1-Click Advisory Workflows** (context-aware Q&A and UI-driving agent tools powered by Vertex AI Gemini 3 Flash / 3.1 Pro and `skills/capacity-radar/SKILL.md`).
 
 ## Part 1: Quota Verification & Pre-Flight Filtering Improvements
 

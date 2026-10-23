@@ -13,30 +13,46 @@ Capacity Radar automates finding and securing GPU/TPU capacity across Google Clo
 
 ## Features
 
+### In-App AI Capacity Assistant (Gemini 3 Flash & Gemini 3.1 Pro)
+- **Always-accessible collapsible chat panel** — Click **Ask Radar AI** in the top bar (or expand the assistant bar directly above the tabs) at any point without losing sight of the active tab below.
+- **Screen-context aware Q&A** — Automatically receives a live snapshot of whichever tab you are viewing (`Capacity Advisory`, `Scan & Deploy`, or `Quota`) so you can ask questions directly about the results on screen (e.g., *"Which of the Spot zones below has the lowest preemption risk?"* or *"Which quotas on my project have a limit > 0?"*).
+- **Agentic tool execution & UI driving** — Powered by Vertex AI **Gemini 3 Flash** (`gemini-3-flash-preview`) and **Gemini 3.1 Pro** (`gemini-3.1-pro-preview`) using the bundled [`skills/capacity-radar/SKILL.md`](skills/capacity-radar/SKILL.md) workflow:
+  - Runs **all supported advisories in parallel** (`advise_all`: DWS Calendar + Spot VM + DWS Flex Start) and populates all three result cards on the **Capacity Advisory** tab automatically.
+  - Queries live project quotas (`check_project_quotas`) and filters the **Quota** tab (`drive_ui_filter_quotas`).
+  - Pre-configures single- or multi-priority hunting plans on the **Scan & Deploy** tab (`drive_ui_configure_scan`) while requiring explicit user confirmation before launching billable deployments.
+
+### GPU & TPU Quota Explorer Tab
+- **Complete 51-item GPU, TPU & VM Quota Catalog** — Covers all NVIDIA GPUs (`GB300`, `GB200`, `B200`, `H200`, `H100 Mega/High/Edge`, `RTX PRO 6000`, `A100 80GB/40GB`, `L4`, `T4`, `GPUS_ALL_REGIONS`), all Cloud TPUs (`v7x Ironwood`, `v6e Trillium`, `v5p`, `v5e Serving & Batch`, `v4`, `v3`, `v2`), and related VM/host quotas (`CPUS`, `PREEMPTIBLE_CPUS`, `A2_CPUS`, `CPUS_ALL_REGIONS`, `tpu.googleapis.com/queuedResources`, `tpus_per_tpu_family`).
+- **Live regional & zonal limits and usage** — Queries Service Usage API (`consumerQuotaMetrics`) and Compute Engine API (`regions`/`projects`) in parallel to display real-time project limits and usage per region/zone.
+- **Consumption model & family filtering** — Filter by `GPU` / `TPU`, specific accelerator chips, VM families, consumption models (`On-Demand / Reserved`, `Spot VM`, `DWS Flex-Start`, `DWS Calendar`, `Committed CUD`), non-zero limits, or toggle **Show related VM & host quotas**.
+- **1-click GCP Console Quota deep links** — Click any quota row or location chip to open the Google Cloud Console Quotas page pre-filtered to that exact metric and project.
+
 ### Scan & Deploy
 - **Priority-based scanning** — Define up to 4 priorities (e.g., try On-Demand first, then DWS Calendar, then Spot)
-- **Multi-zone scanning** — Automatically tries all supported zones for the chosen machine type
+- **1-click deploy from any Advisory card** — Click **Deploy** on any recommended zone (or **Scan All Zones**) in **DWS Calendar Advisory**, **Spot VM Advisory**, or **DWS Flex Start Advisory** to jump straight into **Scan & Deploy** with all settings pre-populated
+- **Multi-zone scanning & fail-fast quota pruning** — Automatically tries all supported zones and prunes regions/zones that fail with `QUOTA_EXCEEDED` so scans fail fast onto the next priority
 - **Real-time progress** — WebSocket-based live updates with detailed step-by-step logs
 - **Sequential or Parallel** execution modes
+- **VPC network & subnetwork selector** — Pick an existing VPC/subnet or create a new VPC directly from the UI
 - **Custom naming** — Set resource name prefixes for reservations and VMs
 - **Cancel anytime** — Cancel a running scan and the tool stops gracefully
 
 ### Consumption Models
 
-| Model | Description | GPU Families |
-|-------|-------------|--------------|
-| **On-Demand Reservation** | Reserve capacity at on-demand rates. Immediate if available. | A3 Edge/Mega/High, A2, G2, G4 |
-| **DWS Calendar Mode** | Book capacity for a specific time window as a future reservation. Uses DENSE deployment for multi-node GPU families. | A4, A3 Ultra/Mega/High/Edge |
-| **DWS Flex Start** | Queue for capacity; retries until GPUs become available. For TPUs, uses Queued Resources with configurable max wait time. | A4, A3, A4X |
-| **Spot VMs** | Spare capacity at discount. Can be preempted at any time. | All GPU families |
+| Model | Description | GPU / TPU Support |
+|-------|-------------|-------------------|
+| **On-Demand Reservation** | Reserve capacity at on-demand rates. Immediate if available. | A3 Edge/Mega/High, A2, G2, G4, A4X; TPU v7x, v6e, v5p, v5e, v4, v3, v2 |
+| **DWS Calendar Mode** | Book capacity for a specific time window as a future reservation (`CALENDAR` mode, `DENSE` deployment). Polls until `PROCURING` / `APPROVED` / `FULFILLED`. | GPU A4, A3 Ultra/Mega/High/Edge; TPU v6e, v5p, v5e |
+| **DWS Flex Start** | Queue for capacity; retries until GPUs become available. For TPUs, uses Queued Resources (`runDuration` + dedicated DWS Flex pool zone ordering). | GPU A4, A3, A4X, A4X Max, G4, G2, N1; TPU v7x, v6e, v5p, v5e, v4 |
+| **Spot VMs** | Spare capacity at discount. Can be preempted at any time. | All GPU & TPU families |
 
 ### Capacity Advisory
 
-- **DWS Calendar Advisory** — Query the Calendar Mode Advisory API to find optimal zones and time windows
-  - **Check Availability** — Query with your exact parameters (start date, flexibility, duration)
+- **DWS Calendar Advisory** — Query the Calendar Mode Advisory API (`advice/calendarMode`, supporting both GPU `specificSkuResources` and TPU `aggregateResources` for `v6e`, `v5p`, `v5e`) to find optimal zones and time windows:
+  - **Check Availability** — Search up to **+365 days (1 year)** ahead (or any custom AI horizon) for **1 to N day** reservation slots
   - **Find Best Plan** — Queries at multiple VM count levels (100%, 75%, 50%, 25%, 1 VM) to show how to split capacity across multiple smaller reservations
-- **Spot VM Advisory** — Check spot capacity availability and preemption risk across zones
-- **DWS Flex Start Advisory** _(Preview — requires a whitelisted project)_ — For a chosen machine type, size, and region/zone, estimates how long a DWS Flex Start request would wait in the queue before capacity is granted. This capability is in Preview and is only available for allow-listed (whitelisted) projects; non-whitelisted projects receive `The service is not available for this project.`
+- **Spot VM Advisory** — Check spot capacity availability and preemption risk across zones, with 1-click **Deploy** buttons
+- **DWS Flex Start Advisory** _(Preview — requires a whitelisted project)_ — Estimates how long a DWS Flex Start request would wait in the queue before capacity is granted, with 1-click **Deploy** buttons
 
 ### Supported Hardware
 
@@ -58,14 +74,15 @@ Capacity Radar automates finding and securing GPU/TPU capacity across Google Clo
 
 **TPU Types:**
 
-| Type | Zones | DWS Calendar | Spot |
-|------|-------|:------------:|:----:|
-| v6e (Trillium) | 7 zones | Yes | Yes |
-| v5p | 3 zones | Yes | Yes |
-| v5e | 5 zones | Yes | Yes |
-| v4 | 1 zone | - | Yes |
-| v3 | 3 zones | - | Yes |
-| v2 | 5 zones | - | Yes |
+| Type | Zones | DWS Calendar | DWS Flex | Spot | On-Demand |
+|------|-------|:------------:|:--------:|:----:|:---------:|
+| v7x (Ironwood) | 5 zones | - | Yes | Yes | Yes |
+| v6e (Trillium) | 9 zones | Yes (`aggregateResources`) | Yes | Yes | Yes |
+| v5p | 3 zones | Yes (`aggregateResources`) | Yes | Yes | Yes |
+| v5e | 5 zones | Yes (`aggregateResources`) | Yes | Yes | Yes |
+| v4 | 1 zone | - | Yes | Yes | Yes |
+| v3 | 3 zones | - | - | Yes | Yes |
+| v2 | 5 zones | - | - | Yes | Yes |
 
 ---
 
@@ -153,19 +170,26 @@ Frontend dev server runs on http://localhost:3000 with API proxy to :8000.
 capacity_radar/
 ├── backend/
 │   ├── main.py              # FastAPI server — REST + WebSocket endpoints
-│   ├── hunter.py            # Core scanning engine (GPU & TPU deployment)
-│   ├── advisory.py          # DWS Calendar & Spot advisory API queries
+│   ├── agent.py             # Gemini 3 Flash / 3.1 Pro AI Assistant & UI-driving tool loop
+│   ├── quotas.py            # 51-item GPU/TPU/VM quota catalog + live Service Usage / GCE fetcher
+│   ├── hunter.py            # Core scanning engine (GPU & TPU deployment + quota fail-fast)
+│   ├── advisory.py          # DWS Calendar (up to 365d), Spot & Flex advisory API queries
 │   ├── gpu_data.py          # Machine type catalog, zone mappings, consumption support
 │   └── requirements.txt     # Python dependencies
 ├── frontend/
 │   ├── src/
-│   │   ├── App.jsx          # Main app — auth drawer, tab navigation
+│   │   ├── App.jsx          # Main app — auth drawer, AI assistant bar, tab navigation
 │   │   └── components/
-│   │       ├── AdvisoryPanel.jsx       # Calendar, Spot & DWS Flex advisory queries
-│   │       ├── ScanningPanel.jsx       # Scan & Deploy configuration + live logs
+│   │       ├── ChatAssistant.jsx       # Collapsible top AI Capacity Assistant panel
+│   │       ├── AdvisoryPanel.jsx       # Calendar, Spot & DWS Flex advisory queries + 1-click deploy
+│   │       ├── ScanningPanel.jsx       # Scan & Deploy configuration + live WebSocket logs
+│   │       ├── QuotaPanel.jsx          # GPU & TPU Quota Explorer with Cloud Console deep links
 │   │       └── MachineTypeSelector.jsx # Category → Chip → Machine type picker
 │   ├── vite.config.js       # Vite config with API proxy
 │   └── package.json
+├── skills/
+│   └── capacity-radar/      # Bundled AI Agent Skill (SKILL.md + CLI script)
+├── CHANGELOG.md             # Release & feature history
 └── README.md
 ```
 
@@ -175,8 +199,9 @@ capacity_radar/
 |-------|-----------|
 | Backend | Python 3.10+, FastAPI, WebSocket, httpx |
 | Frontend | React 18, Material UI v5, Vite |
-| Auth | Google Application Default Credentials (ADC) |
-| APIs | Compute Engine REST API (v1), TPU API (v2), Spot Advisory (alpha) |
+| AI Agent | Vertex AI Gemini (`gemini-3-flash-preview`, `gemini-3.1-pro-preview`), Function Calling |
+| Auth | Google Application Default Credentials (ADC) / OAuth 2.0 User Token (`X-User-Token`) |
+| APIs | Compute Engine REST API (`v1`/`beta`/`alpha`), Cloud TPU API (`v2`), Service Usage API (`v1beta1`), Vertex AI API (`v1beta1`) |
 
 ### API Endpoints
 
@@ -184,13 +209,18 @@ capacity_radar/
 |--------|------|-------------|
 | `POST` | `/api/auth/check` | Verify GCP auth and project access |
 | `POST` | `/api/auth/login` | Trigger `gcloud auth application-default login` |
-| `GET` | `/api/machine-types` | List all GPU/TPU machine types with zone info |
+| `GET` | `/api/machine-types` | List all GPU/TPU machine types with zone & support info |
 | `GET` | `/api/chip-groups` | Machine types grouped by chip for the selector |
 | `GET` | `/api/machine-types/{type}/zones` | Zones for a specific machine type |
-| `POST` | `/api/advisory/calendar` | Query DWS Calendar Advisory API |
-| `POST` | `/api/advisory/calendar/splits` | Find best capacity split plan |
+| `POST` | `/api/advisory/calendar` | Query DWS Calendar Advisory API (up to 365 days ahead) |
+| `POST` | `/api/advisory/calendar/splits` | Find best capacity split plan across VM count levels |
 | `POST` | `/api/advisory/spot` | Query Spot VM Advisory API |
 | `POST` | `/api/advisory/flex` | Query DWS Flex Start Capacity Advisory API (Preview — whitelisted projects) |
+| `GET` | `/api/quotas` | Fetch 51-item GPU/TPU/VM quota catalog with live project limits, usage & Console URLs |
+| `GET` | `/api/networks` | List VPC networks and regional subnetworks in the project |
+| `POST` | `/api/networks` | Create a new auto-mode VPC network in the project |
+| `GET` | `/api/chat/models` | List available Gemini 3+ models for the in-app AI Assistant |
+| `POST` | `/api/chat` | Run the AI Capacity Assistant with live screen context and UI-driving tools |
 | `WS` | `/ws/scan` | WebSocket for real-time scan & deploy |
 
 ---
