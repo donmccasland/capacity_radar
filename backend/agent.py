@@ -99,7 +99,7 @@ Connected GCP Project: `{project or "(not connected)"}`
    - `advise_all` runs **DWS Calendar Mode + Spot VM + DWS Flex Start** advisories in parallel and populates ALL THREE result tables on the **Capacity Advisory** tab below your chat panel at the same time (just as if the user clicked all the advisory scan buttons).
    - If the user also wants to know whether their project has quota for that chip, you can also call `check_project_quotas(chip=..., update_ui=false)` (keep `update_ui=false` when running an advisory so you don't switch the user away from the **Capacity Advisory** tab!).
 3. **Date Horizons for DWS Calendar**:
-   - In `advise_all` and `advise_calendar`, `duration_days` is how long the reservation lasts (default `7` days; max `90`), and `flexibility_days` is how many days forward from `start_date` to search (max `85` days due to GCE Calendar Mode API limits). If the user gives a far-future deadline (e.g. *"anytime before 01/01/27"*), calculate the days until that deadline (capped at `85`) and pass it as `flexibility_days`, while keeping `duration_days=7` (unless they asked for a specific reservation duration).
+   - In `advise_all` and `advise_calendar`, `duration_days` is the maximum slot length (default `7` days; the API automatically searches for any `1` to `duration_days` slot!), and `flexibility_days` is how many days forward from `start_date` to search (supports up to `365` days!). If the user gives a far-future deadline (e.g. *"anytime before 01/01/27"* or *"all the way out to the end of the year"*), calculate the days until that deadline (up to `365`) and pass it as `flexibility_days`, while keeping `duration_days=7` (unless they asked for a specific reservation duration).
 4. **Answer Questions About Visible Results**:
    - Inspect `LIVE SCREEN CONTEXT` below first when the user asks about results already on screen.
 5. **Drive Scan & Deploy (`drive_ui_configure_scan`)**:
@@ -592,7 +592,7 @@ async def _execute_tool(
             start_date = (args.get("start_date") or "").strip() or tomorrow
             duration_days = max(1, min(90, int(args.get("duration_days") or 7)))
             raw_flex = int(args.get("flexibility_days") if args.get("flexibility_days") is not None else 14)
-            flexibility_days = max(duration_days, min(85, raw_flex))
+            flexibility_days = max(duration_days, min(365, raw_flex))
             max_run_hours = max(1, min(168, int(args.get("max_run_hours") or 24)))
 
             regions = [r.strip() for r in (args.get("regions") or "").split(",") if r.strip()] or None
@@ -727,7 +727,7 @@ async def _execute_tool(
             start_date = (args.get("start_date") or "").strip() or tomorrow
             duration_days = max(1, min(90, int(args.get("duration_days") or 7)))
             raw_flex = int(args.get("flexibility_days") if args.get("flexibility_days") is not None else 7)
-            flexibility_days = max(duration_days, min(85, raw_flex))
+            flexibility_days = max(duration_days, min(365, raw_flex))
             find_splits = bool(args.get("find_splits", False))
 
             regions = [r.strip() for r in (args.get("regions") or "").split(",") if r.strip()] or None

@@ -489,27 +489,35 @@ export default function AdvisoryPanel({ machineTypes = [], loading: mtLoading, p
                       size="small" inputProps={{ min: 1 }} />
                   </Grid>
                   <Grid item xs={6} sm={3}>
-                    <TextField fullWidth type="number" label="Duration (days)" value={durationDays}
+                    <TextField fullWidth type="number" label="Max Duration (days)" value={durationDays}
                       onChange={(e) => setDurationDays(Math.max(1, parseInt(e.target.value) || 1))}
                       size="small" inputProps={{ min: 1, max: 365 }}
-                      helperText="How long you need GPUs" />
+                      helperText="Finds 1 to N day slots" />
                   </Grid>
                   <Grid item xs={6} sm={3}>
                     <TextField fullWidth type="date" label="Start Date" value={startDate}
                       onChange={(e) => setStartDate(e.target.value)} size="small"
                       InputLabelProps={{ shrink: true }}
-                      helperText="When to start" />
+                      helperText="Earliest start" />
                   </Grid>
                   <Grid item xs={6} sm={3}>
-                    <TextField fullWidth select label="Flexibility" value={flexibilityDays}
+                    <TextField fullWidth select label="Search Window" value={flexibilityDays}
                       onChange={(e) => setFlexibilityDays(parseInt(e.target.value))} size="small"
-                      helperText="Start date flexibility">
-                      <MenuItem value={0}>None (exact date)</MenuItem>
-                      <MenuItem value={1}>+/- 1 day</MenuItem>
-                      <MenuItem value={2}>+/- 2 days</MenuItem>
-                      <MenuItem value={3}>+/- 3 days</MenuItem>
-                      <MenuItem value={7}>+/- 7 days</MenuItem>
-                      <MenuItem value={14}>+/- 14 days</MenuItem>
+                      helperText="How far ahead to search">
+                      <MenuItem value={0}>Exact start date</MenuItem>
+                      <MenuItem value={1}>+1 day</MenuItem>
+                      <MenuItem value={2}>+2 days</MenuItem>
+                      <MenuItem value={3}>+3 days</MenuItem>
+                      <MenuItem value={7}>+7 days (1 week)</MenuItem>
+                      <MenuItem value={14}>+14 days (2 weeks)</MenuItem>
+                      <MenuItem value={30}>+30 days (1 month)</MenuItem>
+                      <MenuItem value={60}>+60 days (2 months)</MenuItem>
+                      <MenuItem value={90}>+90 days (3 months)</MenuItem>
+                      <MenuItem value={180}>+180 days (6 months)</MenuItem>
+                      <MenuItem value={365}>+365 days (1 year)</MenuItem>
+                      {![0, 1, 2, 3, 7, 14, 30, 60, 90, 180, 365].includes(flexibilityDays) && (
+                        <MenuItem value={flexibilityDays}>+{flexibilityDays} days (Custom)</MenuItem>
+                      )}
                     </TextField>
                   </Grid>
                 </Grid>
@@ -560,8 +568,8 @@ export default function AdvisoryPanel({ machineTypes = [], loading: mtLoading, p
                     sx={{ mb: 2, py: 0.5, '& .MuiAlert-message': { fontSize: '0.78rem' } }}>
                     <strong>Check Availability:</strong>{' '}
                     {calendarQueryInfo.startDate}
-                    {calendarQueryInfo.flexibilityDays > 0 && ` (+/- ${calendarQueryInfo.flexibilityDays}d)`}
-                    {' | '}{calendarQueryInfo.durationDays} days
+                    {calendarQueryInfo.flexibilityDays > 0 && ` (+${calendarQueryInfo.flexibilityDays}d window)`}
+                    {' | 1–'}{calendarQueryInfo.durationDays} day slots
                     {(() => {
                       const recs = calendarResults.recommendations || []
                       const recCount = recs.filter(r => r.status === 'RECOMMENDED').length
