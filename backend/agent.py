@@ -6,11 +6,13 @@ and the Capacity Radar Agent Skill (skills/capacity-radar/SKILL.md).
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import json
 import logging
 import os
 from pathlib import Path
+import re
 from typing import Any, Optional
 
 import httpx
@@ -88,15 +90,20 @@ Connected GCP Project: `{project or "(not connected)"}`
 {SKILL_MARKDOWN}
 
 ---
-### How You Operate Inside the Web App
-Unlike a CLI-only agent, you have direct Python function tools that both **query live GCP APIs** AND **drive the web UI tabs below you in real time**:
-- **Answer Questions About Visible Results**: The user can ask about what they are currently seeing on the tabs below. Inspect the `LIVE SCREEN CONTEXT` below first! If the data needed to answer their question is already in `LIVE SCREEN CONTEXT`, explain or compare it clearly without making redundant API calls.
-- **Run Advisories & Update the UI**: When the user asks to find capacity or check Spot / Calendar / Flex availability for a machine type or chip, call `advise_spot`, `advise_calendar`, or `advise_flex` with `update_ui=true`. This automatically switches to the **Capacity Advisory** tab and populates the visual cards below your chat panel!
-- **Check & Filter Quotas**: When the user asks which quota they need, or whether their project has enough quota for a GPU/TPU resource, call `check_project_quotas` (and optionally set `update_ui=true` or call `drive_ui_filter_quotas` to show those quotas on the **Quota** tab).
-- **Drive Scan & Deploy**:
-  - When the user asks you to set up a scan/deployment or help them acquire capacity, call `drive_ui_configure_scan` to switch to the **Scan & Deploy** tab and pre-populate the machine type, VM count, and multi-priority list (`on_demand`, `dws_calendar`, `dws_flex`, `spot`).
-  - **SAFETY RULE**: Always set `auto_start=false` when first configuring a scan so the user can review the pre-filled priorities on the **Scan & Deploy** tab and either click **Start Hunting** or reply *"Yes, start the scan"*. Only set `auto_start=true` if the user has explicitly confirmed they want to launch the scan right now (as this creates real billable GCP resources).
-- **Formatting**: Keep responses concise, well-structured in GitHub-flavored Markdown, use bullet points or compact tables when comparing zones/quotas, and mention when you've updated the tab below.
+### Critical Rules for Chip Resolution & Running Scans on the Advisory Panel
+1. **Exact Chip Matching (Never Confuse B200 with GB200/GB300)**:
+   - When the user asks for **B200**, use `a4-highgpu-8g` (`chip = "B200"`, A4 family). **NEVER substitute `GB200` (`a4x-highgpu-4g`) or `GB300` (`a4x-maxgpu-4g-metal`) when the user asks for `B200`!**
+   - Only check `GB200` (`a4x-highgpu-4g`) if the user explicitly writes `"GB200"` or `"A4X"`.
+2. **Always Execute the Advisory Scans (`advise_all`) When Asked to Find Capacity**:
+   - When the user asks to find capacity for a GPU or TPU (especially open-ended requests like *"help me find any kind of B200 based GPUs on this project, any region, anytime before ..."*), **call `advise_all(machine_type=..., update_ui=true)`**!
+   - `advise_all` runs **DWS Calendar Mode + Spot VM + DWS Flex Start** advisories in parallel and populates ALL THREE result tables on the **Capacity Advisory** tab below your chat panel at the same time (just as if the user clicked all the advisory scan buttons).
+   - If the user also wants to know whether their project has quota for that chip, you can also call `check_project_quotas(chip=..., update_ui=false)` (keep `update_ui=false` when running an advisory so you don't switch the user away from the **Capacity Advisory** tab!).
+3. **Date Horizons for DWS Calendar**:
+   - In `advise_all` and `advise_calendar`, `duration_days` is how long the reservation lasts (default `7` days; max `90`), and `flexibility_days` is how many days forward from `start_date` to search (max `85` days due to GCE Calendar Mode API limits). If the user gives a far-future deadline (e.g. *"anytime before 01/01/27"*), calculate the days until that deadline (capped at `85`) and pass it as `flexibility_days`, while keeping `duration_days=7` (unless they asked for a specific reservation duration).
+4. **Answer Questions About Visible Results**:
+   - Inspect `LIVE SCREEN CONTEXT` below first when the user asks about results already on screen.
+5. **Drive Scan & Deploy (`drive_ui_configure_scan`)**:
+   - When the user asks you to set up a scan/deployment or wants to proceed with deploying one of the recommended zones, call `drive_ui_configure_scan` (`auto_start=false` by default until the user confirms starting billable resources).
 
 ---
 ### LIVE SCREEN CONTEXT (What the user currently sees on the tabs below)
@@ -107,6 +114,57 @@ Unlike a CLI-only agent, you have direct Python function tools that both **query
 
 
 TOOL_DECLARATIONS = [
+    {
+        "name": "advise_all",
+        "description": (
+            "Run ALL supported capacity advisories (DWS Calendar Mode, Spot VM, and DWS Flex Start) "
+            "in parallel for a machine type and populate all result panels on the Capacity Advisory tab "
+            "below. Prefer this tool whenever the user asks to find capacity for a GPU or TPU without "
+            "restricting to a single consumption model."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "machine_type": {
+                    "type": "STRING",
+                    "description": "Exact GPU or TPU machine type (e.g. 'a4-highgpu-8g' for B200, 'a3-highgpu-8g' for H100, 'g2-standard-4' for L4, 'ct6e-standard-4t' for TPU v6e).",
+                },
+                "vm_count": {
+                    "type": "INTEGER",
+                    "description": "Number of VMs / TPU slices requested (default 1).",
+                },
+                "start_date": {
+                    "type": "STRING",
+                    "description": "Target start date in YYYY-MM-DD format for DWS Calendar (defaults to tomorrow).",
+                },
+                "duration_days": {
+                    "type": "INTEGER",
+                    "description": "Reservation duration in days for DWS Calendar (1 to 90, default 7).",
+                },
+                "flexibility_days": {
+                    "type": "INTEGER",
+                    "description": "Search window length in days for DWS Calendar (1 to 85, default 14).",
+                },
+                "max_run_hours": {
+                    "type": "INTEGER",
+                    "description": "Max run duration hours for DWS Flex Start (1 to 168, default 24).",
+                },
+                "regions": {
+                    "type": "STRING",
+                    "description": "Optional comma-separated region filter.",
+                },
+                "zones": {
+                    "type": "STRING",
+                    "description": "Optional comma-separated zone filter.",
+                },
+                "update_ui": {
+                    "type": "BOOLEAN",
+                    "description": "If true (default), switches to the Capacity Advisory tab and displays all results.",
+                },
+            },
+            "required": ["machine_type"],
+        },
+    },
     {
         "name": "catalog_chips_and_machines",
         "description": (
@@ -123,7 +181,7 @@ TOOL_DECLARATIONS = [
                 },
                 "chip_filter": {
                     "type": "STRING",
-                    "description": "Optional substring filter on chip or machine type (e.g. 'H100', 'B200', 'v6e', 'a3-highgpu-8g').",
+                    "description": "Optional filter on chip or machine type (e.g. 'B200', 'H100', 'v6e', 'a4-highgpu-8g').",
                 },
             },
         },
@@ -140,7 +198,7 @@ TOOL_DECLARATIONS = [
             "properties": {
                 "machine_type": {
                     "type": "STRING",
-                    "description": "Exact GCE machine type (e.g. 'a3-highgpu-8g', 'g2-standard-4', 'a2-highgpu-1g').",
+                    "description": "Exact GCE machine type (e.g. 'a4-highgpu-8g', 'a3-highgpu-8g', 'g2-standard-4').",
                 },
                 "regions": {
                     "type": "STRING",
@@ -171,7 +229,7 @@ TOOL_DECLARATIONS = [
             "properties": {
                 "machine_type": {
                     "type": "STRING",
-                    "description": "Exact GPU or TPU machine type (e.g. 'a3-highgpu-8g', 'a3-megagpu-8g', 'ct6e-standard-4t').",
+                    "description": "Exact GPU or TPU machine type (e.g. 'a4-highgpu-8g', 'a3-highgpu-8g', 'ct6e-standard-4t').",
                 },
                 "vm_count": {
                     "type": "INTEGER",
@@ -187,7 +245,7 @@ TOOL_DECLARATIONS = [
                 },
                 "flexibility_days": {
                     "type": "INTEGER",
-                    "description": "Additional search window flexibility in days beyond start_date + duration_days (default 3).",
+                    "description": "Search window flexibility in days from start_date (1 to 85, default 7).",
                 },
                 "find_splits": {
                     "type": "BOOLEAN",
@@ -220,7 +278,7 @@ TOOL_DECLARATIONS = [
             "properties": {
                 "machine_type": {
                     "type": "STRING",
-                    "description": "Exact GPU machine type (e.g. 'a3-highgpu-8g', 'g2-standard-4').",
+                    "description": "Exact GPU machine type (e.g. 'a4-highgpu-8g', 'a3-highgpu-8g', 'g2-standard-4').",
                 },
                 "size": {
                     "type": "INTEGER",
@@ -250,8 +308,9 @@ TOOL_DECLARATIONS = [
         "name": "check_project_quotas",
         "description": (
             "Query the connected project's live GPU, TPU, and VM quotas across all regions/zones, "
-            "filtered by category, chip, VM family, consumption model, or location. Optionally "
-            "switches to and filters the Quota tab in the UI."
+            "filtered by category, chip, VM family, consumption model, or location. Keep update_ui=false "
+            "if you are showing Capacity Advisory results so you don't switch away from the Advisory tab; "
+            "set update_ui=true only when the user wants to view the Quota tab."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -262,7 +321,7 @@ TOOL_DECLARATIONS = [
                 },
                 "chip": {
                     "type": "STRING",
-                    "description": "Optional chip substring filter (e.g. 'H100', 'B200', 'L4', 'v6e', 'v5p').",
+                    "description": "Optional chip filter (e.g. 'B200', 'H100', 'L4', 'v6e', 'v5p').",
                 },
                 "vm_family": {
                     "type": "STRING",
@@ -286,7 +345,7 @@ TOOL_DECLARATIONS = [
                 },
                 "update_ui": {
                     "type": "BOOLEAN",
-                    "description": "If true, switches the UI to the Quota tab and applies these filters.",
+                    "description": "If true, switches the UI to the Quota tab and applies these filters (default false).",
                 },
             },
         },
@@ -319,7 +378,7 @@ TOOL_DECLARATIONS = [
             "properties": {
                 "machine_type": {
                     "type": "STRING",
-                    "description": "Exact GPU or TPU machine type (e.g. 'a3-highgpu-8g', 'ct6e-standard-4t').",
+                    "description": "Exact GPU or TPU machine type (e.g. 'a4-highgpu-8g', 'a3-highgpu-8g', 'ct6e-standard-4t').",
                 },
                 "vm_count": {
                     "type": "INTEGER",
@@ -396,7 +455,7 @@ TOOL_DECLARATIONS = [
                 "families": {
                     "type": "ARRAY",
                     "items": {"type": "STRING"},
-                    "description": "VM families to filter by (e.g. ['A3', 'G2']).",
+                    "description": "VM families to filter by (e.g. ['A3', 'A4', 'G2']).",
                 },
                 "models": {
                     "type": "ARRAY",
@@ -443,7 +502,26 @@ def _lookup_machine_meta(machine_type: str) -> dict:
     for mt in get_all_machine_types_info():
         if mt["machineType"] == machine_type:
             return mt
-    return {"category": "TPU" if machine_type in TPU_TYPES else "GPU", "chip": "", "machineType": machine_type}
+    return {
+        "category": "TPU" if machine_type in TPU_TYPES else "GPU",
+        "chip": "",
+        "machineType": machine_type,
+        "supported": {},
+        "advisorySupported": {},
+    }
+
+
+def _chip_matches(query: str, text: str) -> bool:
+    """Match chip token with word boundaries so 'B200' never matches 'GB200'."""
+    q = query.strip().lower()
+    t = (text or "").strip().lower()
+    if not q:
+        return True
+    if q == t:
+        return True
+    # Word-boundary regex match (so \bb200\b matches "nvidia b200" but NOT "nvidia gb200")
+    pattern = rf"(?<![a-z0-9]){re.escape(q)}(?![a-z0-9])"
+    return bool(re.search(pattern, t))
 
 
 async def _execute_tool(
@@ -457,30 +535,157 @@ async def _execute_tool(
     try:
         if name == "catalog_chips_and_machines":
             cat_filter = (args.get("category") or "").strip().upper()
-            chip_filter = (args.get("chip_filter") or "").strip().lower()
+            chip_filter = (args.get("chip_filter") or "").strip()
             all_mts = get_all_machine_types_info()
-            filtered = []
-            for mt in all_mts:
-                if cat_filter in ("GPU", "TPU") and mt.get("category") != cat_filter:
-                    continue
-                if chip_filter:
-                    haystack = f"{mt.get('machineType','')} {mt.get('chip','')} {mt.get('gpuModel','')}".lower()
-                    if chip_filter not in haystack:
-                        continue
-                filtered.append({
+
+            def _format_mt(mt: dict) -> dict:
+                return {
                     "machineType": mt["machineType"],
                     "category": mt.get("category", "GPU"),
                     "chip": mt.get("chip"),
+                    "gpu": mt.get("gpu"),
+                    "family": mt.get("family"),
                     "acceleratorCount": mt.get("gpuCount"),
-                    "supportedConsumption": mt.get("supportedConsumption"),
-                    "zoneCount": mt.get("zoneCount", len(mt.get("zones", []))),
+                    "supported": mt.get("supported"),
+                    "advisorySupported": mt.get("advisorySupported"),
+                    "zoneCount": len(mt.get("zones", [])),
                     "zones": mt.get("zones", []),
-                })
+                }
+
+            cat_mts = [
+                mt for mt in all_mts
+                if cat_filter not in ("GPU", "TPU") or mt.get("category") == cat_filter
+            ]
+
+            if chip_filter:
+                # 1. Word-boundary / exact token match first (prevents 'B200' matching 'GB200')
+                exact_matches = [
+                    _format_mt(mt) for mt in cat_mts
+                    if _chip_matches(chip_filter, f"{mt.get('chip','')} {mt.get('gpu','')} {mt.get('machineType','')} {mt.get('family','')}")
+                ]
+                if exact_matches:
+                    filtered = exact_matches
+                else:
+                    # 2. Fallback to substring match only if no word-boundary match exists
+                    cf_lower = chip_filter.lower()
+                    filtered = [
+                        _format_mt(mt) for mt in cat_mts
+                        if cf_lower in f"{mt.get('chip','')} {mt.get('gpu','')} {mt.get('machineType','')} {mt.get('family','')}".lower()
+                    ]
+            else:
+                filtered = [_format_mt(mt) for mt in cat_mts]
+
             return {
                 "ok": True,
                 "count": len(filtered),
                 "machineTypes": filtered,
                 "chipGroups": get_chip_groups() if not chip_filter else None,
+            }
+
+        elif name == "advise_all":
+            if not project:
+                return {"ok": False, "error": "No GCP project connected. Ask the user to connect a project first."}
+            mt = args["machine_type"]
+            meta = _lookup_machine_meta(mt)
+            vm_count = max(1, int(args.get("vm_count") or 1))
+            tomorrow = (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
+            start_date = (args.get("start_date") or "").strip() or tomorrow
+            duration_days = max(1, min(90, int(args.get("duration_days") or 7)))
+            raw_flex = int(args.get("flexibility_days") if args.get("flexibility_days") is not None else 14)
+            flexibility_days = max(duration_days, min(85, raw_flex))
+            max_run_hours = max(1, min(168, int(args.get("max_run_hours") or 24)))
+
+            regions = [r.strip() for r in (args.get("regions") or "").split(",") if r.strip()] or None
+            zones = [z.strip() for z in (args.get("zones") or "").split(",") if z.strip()] or None
+            if not zones and not regions:
+                all_z = get_zones_for_machine_type(mt)
+                zones = all_z or None
+                regions = sorted({z.rsplit("-", 1)[0] for z in all_z}) if all_z else None
+
+            adv_sup = meta.get("advisorySupported") or meta.get("supported") or {}
+            run_cal = adv_sup.get("dws_calendar", True)
+            run_spot = adv_sup.get("spot", True)
+            run_flex = adv_sup.get("dws_flex", True)
+
+            async def _maybe_cal():
+                if not run_cal:
+                    return None
+                return await advisory.get_calendar_advisory(
+                    project=project,
+                    machine_type=mt,
+                    vm_count=vm_count,
+                    start_date=start_date,
+                    flexibility_days=flexibility_days,
+                    duration_days=duration_days,
+                    regions=regions,
+                    zones=zones,
+                    user_token=user_token,
+                )
+
+            async def _maybe_spot():
+                if not run_spot:
+                    return None
+                return await advisory.get_spot_advisory(
+                    project=project,
+                    machine_type=mt,
+                    regions=regions,
+                    zones=zones,
+                    user_token=user_token,
+                )
+
+            async def _maybe_flex():
+                if not run_flex:
+                    return None
+                return await advisory.get_flex_advisory(
+                    project=project,
+                    machine_type=mt,
+                    size=vm_count,
+                    max_run_duration_hours=max_run_hours,
+                    regions=regions,
+                    zones=zones,
+                    user_token=user_token,
+                )
+
+            cal_res, spot_res, flex_res = await asyncio.gather(
+                _maybe_cal(), _maybe_spot(), _maybe_flex()
+            )
+
+            if args.get("update_ui", True):
+                action: dict[str, Any] = {
+                    "type": "update_advisory",
+                    "tab": 0,
+                    "category": meta.get("category", "GPU"),
+                    "chip": meta.get("chip", ""),
+                    "machineType": mt,
+                    "vmCount": vm_count,
+                    "startDate": start_date,
+                    "durationDays": duration_days,
+                    "flexibilityDays": flexibility_days,
+                    "flexSize": vm_count,
+                    "flexMaxRunHours": max_run_hours,
+                    "calendarQueryInfo": {
+                        "mode": "check",
+                        "startDate": start_date,
+                        "flexibilityDays": flexibility_days,
+                        "durationDays": duration_days,
+                        "vmCount": vm_count,
+                    },
+                }
+                if cal_res is not None:
+                    action["calendarResults"] = cal_res
+                if spot_res is not None:
+                    action["spotResults"] = spot_res
+                if flex_res is not None:
+                    action["flexResults"] = flex_res
+                ui_actions.append(action)
+
+            return {
+                "ok": True,
+                "machineType": mt,
+                "chip": meta.get("chip"),
+                "calendarAdvisory": cal_res,
+                "spotAdvisory": spot_res,
+                "flexAdvisory": flex_res,
             }
 
         elif name == "advise_spot":
@@ -517,11 +722,12 @@ async def _execute_tool(
             if not project:
                 return {"ok": False, "error": "No GCP project connected. Ask the user to connect a project first."}
             mt = args["machine_type"]
-            vm_count = int(args.get("vm_count") or 1)
+            vm_count = max(1, int(args.get("vm_count") or 1))
             tomorrow = (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
             start_date = (args.get("start_date") or "").strip() or tomorrow
-            duration_days = int(args.get("duration_days") or 7)
-            flexibility_days = int(args.get("flexibility_days") if args.get("flexibility_days") is not None else 3)
+            duration_days = max(1, min(90, int(args.get("duration_days") or 7)))
+            raw_flex = int(args.get("flexibility_days") if args.get("flexibility_days") is not None else 7)
+            flexibility_days = max(duration_days, min(85, raw_flex))
             find_splits = bool(args.get("find_splits", False))
 
             regions = [r.strip() for r in (args.get("regions") or "").split(",") if r.strip()] or None
@@ -588,8 +794,8 @@ async def _execute_tool(
             if not project:
                 return {"ok": False, "error": "No GCP project connected. Ask the user to connect a project first."}
             mt = args["machine_type"]
-            size = int(args.get("size") or 1)
-            max_run_hours = int(args.get("max_run_hours") or 24)
+            size = max(1, int(args.get("size") or 1))
+            max_run_hours = max(1, min(168, int(args.get("max_run_hours") or 24)))
             regions = [r.strip() for r in (args.get("regions") or "").split(",") if r.strip()] or None
             zones = [z.strip() for z in (args.get("zones") or "").split(",") if z.strip()] or None
             if not zones and not regions:
@@ -625,7 +831,7 @@ async def _execute_tool(
                 return {"ok": False, "error": "No GCP project connected."}
             data = await get_project_quotas(project, user_token=user_token, refresh=False)
             cat = (args.get("category") or "ALL").strip().upper()
-            chip_q = (args.get("chip") or "").strip().lower()
+            chip_q = (args.get("chip") or "").strip()
             fam_q = (args.get("vm_family") or "").strip().lower()
             mod_q = (args.get("consumption_model") or "").strip().lower()
             loc_q = (args.get("location") or "").strip().lower()
@@ -638,7 +844,7 @@ async def _execute_tool(
                     continue
                 if not inc_vm and q.get("isVmQuota"):
                     continue
-                if chip_q and chip_q not in (q.get("chip") or "").lower() and chip_q not in (q.get("displayName") or "").lower():
+                if chip_q and not _chip_matches(chip_q, f"{q.get('chip','')} {q.get('displayName','')}"):
                     continue
                 if fam_q and not any(fam_q in f.lower() for f in (q.get("vmFamilies") or [])):
                     continue
@@ -786,16 +992,63 @@ async def _execute_tool(
         return {"ok": False, "error": str(e)}
 
 
+def _coalesce_ui_actions(ui_actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge multiple update_advisory actions so separate tool calls never clobber each other."""
+    if len(ui_actions) <= 1:
+        return ui_actions
+
+    advisory_by_mt: dict[str, dict[str, Any]] = {}
+    other_actions: list[dict[str, Any]] = []
+
+    for act in ui_actions:
+        if act.get("type") == "update_advisory":
+            mt = act.get("machineType") or "_default"
+            if mt not in advisory_by_mt:
+                advisory_by_mt[mt] = dict(act)
+            else:
+                advisory_by_mt[mt].update(act)
+        else:
+            other_actions.append(act)
+
+    if not advisory_by_mt:
+        return other_actions
+
+    # Pick the most complete advisory update (or the first requested machine type that has results)
+    best_mt = next(iter(advisory_by_mt.keys()))
+    best_score = -1
+    for mt, merged in advisory_by_mt.items():
+        score = 0
+        if merged.get("calendarResults") or merged.get("splitsResults"):
+            score += 2
+        if merged.get("spotResults") and (merged["spotResults"].get("recommendations") or merged["spotResults"].get("scores")):
+            score += 2
+        if merged.get("flexResults") and merged["flexResults"].get("recommendations"):
+            score += 2
+        if score > best_score:
+            best_score = score
+            best_mt = mt
+
+    # If we have an advisory update, keep the user on the Advisory tab (tab 0) unless configure_scan was called
+    has_scan = any(a.get("type") == "configure_scan" for a in other_actions)
+    filtered_others = [
+        a for a in other_actions
+        if not (a.get("type") == "filter_quotas" and not has_scan)
+    ]
+    result = filtered_others + [advisory_by_mt[best_mt]]
+    return result
+
+
 async def _call_vertex_gemini(
     contents: list[dict[str, Any]],
     system_instruction: str,
     model: str,
     project: str,
     user_token: Optional[str],
+    allow_tools: bool = True,
 ) -> dict[str, Any]:
     """Call Vertex AI Gemini (global endpoint) with automatic credential/project fallback."""
     api_key = os.environ.get("GEMINI_API_KEY", "").strip()
-    payload = {
+    payload: dict[str, Any] = {
         "systemInstruction": {"parts": [{"text": system_instruction}]},
         "contents": contents,
         "tools": [{"functionDeclarations": TOOL_DECLARATIONS}],
@@ -804,6 +1057,8 @@ async def _call_vertex_gemini(
             "maxOutputTokens": 4096,
         },
     }
+    if not allow_tools:
+        payload["toolConfig"] = {"functionCallingConfig": {"mode": "NONE"}}
 
     async with httpx.AsyncClient(timeout=60.0) as client:
         if api_key:
@@ -813,7 +1068,6 @@ async def _call_vertex_gemini(
                 return resp.json()
             logger.warning(f"GEMINI_API_KEY call returned {resp.status_code}: {resp.text[:200]}")
 
-        # Build candidate (token, vertex_project) pairs in priority order
         attempts: list[tuple[str, str]] = []
         server_token: Optional[str] = None
         try:
@@ -878,7 +1132,6 @@ async def run_agent_chat(
 
     system_instruction = _build_system_instruction(project, ui_context)
 
-    # Convert frontend chat messages [{role: 'user'|'assistant', content: '...'}] into Gemini contents
     contents: list[dict[str, Any]] = []
     for msg in messages[-20:]:
         role = "model" if msg.get("role") in ("assistant", "model") else "user"
@@ -897,14 +1150,15 @@ async def run_agent_chat(
     ui_actions: list[dict[str, Any]] = []
     tool_traces: list[dict[str, Any]] = []
 
-    max_rounds = 5
-    for _round in range(max_rounds):
+    max_rounds = 8
+    for round_idx in range(max_rounds):
         resp_data = await _call_vertex_gemini(
             contents=contents,
             system_instruction=system_instruction,
             model=chosen_model,
             project=project,
             user_token=user_token,
+            allow_tools=(round_idx < max_rounds - 1),
         )
         candidates = resp_data.get("candidates") or []
         if not candidates:
@@ -915,7 +1169,6 @@ async def run_agent_chat(
 
         function_calls = [p["functionCall"] for p in parts if "functionCall" in p]
         if not function_calls:
-            # Final text answer
             reply_texts = [p.get("text", "") for p in parts if "text" in p and not p.get("thought")]
             reply = "\n".join(t for t in reply_texts if t).strip()
             if not reply:
@@ -923,7 +1176,7 @@ async def run_agent_chat(
             return {
                 "reply": reply,
                 "toolCalls": tool_traces,
-                "uiActions": ui_actions,
+                "uiActions": _coalesce_ui_actions(ui_actions),
                 "model": chosen_model,
             }
 
@@ -955,10 +1208,9 @@ async def run_agent_chat(
 
         contents.append({"role": "user", "parts": response_parts})
 
-    # If max tool rounds reached, extract any text or return summary
     return {
         "reply": "I've completed running the capacity checks and updated the view below.",
         "toolCalls": tool_traces,
-        "uiActions": ui_actions,
+        "uiActions": _coalesce_ui_actions(ui_actions),
         "model": chosen_model,
     }

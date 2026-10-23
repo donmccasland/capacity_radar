@@ -87,7 +87,10 @@ export default function AdvisoryPanel({ machineTypes = [], loading: mtLoading, p
     if (!advisoryPreset) return
     if (advisoryPreset.category) setCategory(advisoryPreset.category)
     if (advisoryPreset.chip) setChip(advisoryPreset.chip)
-    if (advisoryPreset.machineType) setMachineType(advisoryPreset.machineType)
+    if (advisoryPreset.machineType) {
+      setMachineType(advisoryPreset.machineType)
+      setSelectedZones([])
+    }
     if (advisoryPreset.vmCount != null) setVmCount(advisoryPreset.vmCount)
     if (advisoryPreset.startDate) setStartDate(advisoryPreset.startDate)
     if (advisoryPreset.durationDays != null) setDurationDays(advisoryPreset.durationDays)
@@ -138,13 +141,13 @@ export default function AdvisoryPanel({ machineTypes = [], loading: mtLoading, p
         : null,
       splitsResults: splitsResults
         ? {
-            plans: (splitsResults.plans || []).slice(0, 5),
+            plans: (splitsResults.plans || splitsResults.splits || []).slice(0, 5),
             singleZoneAvailable: splitsResults.singleZoneAvailable,
           }
         : null,
       spotResults: spotResults
         ? {
-            scores: (spotResults.scores || []).slice(0, 20),
+            recommendations: (spotResults.recommendations || spotResults.scores || []).slice(0, 20),
             errorCount: (spotResults.errors || []).length,
           }
         : null,

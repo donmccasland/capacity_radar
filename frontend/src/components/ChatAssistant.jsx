@@ -15,6 +15,7 @@ import SmartToyOutlinedIcon from '@mui/icons-material/SmartToyOutlined'
 import PersonOutlineIcon from '@mui/icons-material/PersonOutline'
 
 const TOOL_LABELS = {
+  advise_all: 'Ran All Capacity Advisories (Calendar + Spot + Flex)',
   catalog_chips_and_machines: 'Checked GPU/TPU Catalog',
   advise_spot: 'Ran Spot VM Advisory',
   advise_calendar: 'Ran DWS Calendar Advisory',

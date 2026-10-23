@@ -102,14 +102,25 @@ mirror how the app collects inputs. Never guess the project ID.
    JSON and help them fix it.
 2. **Clarify intent.** Ask what they want: *advice* (safe) or *deploy* (creates
    resources). Suggest capabilities they may not know about.
-3. **Resolve the resource.** If they name a GPU loosely ("H100", "8x H100"),
-   use `catalog chips` to map it to a machine type (e.g. `a3-highgpu-8g`). Use
-   `catalog zones` to confirm/suggest regions & zones. Ask for any missing
-   inputs (VM count, region/zone, duration, size, dates).
-4. **Run the advisory** the user wants and summarize results clearly (which
-   zones have capacity, estimated waits, preemption risk). For DWS Flex, note it
-   is Preview/whitelisted; if you get `The service is not available for this
-   project.`, explain the project needs allow-listing.
+3. **Resolve the resource accurately (NEVER confuse B200 with GB200/GB300).**
+   Use this exact chip-to-machine-type mapping:
+   - **B200 (NVIDIA B200, A4 family)**: `a4-highgpu-8g` (8x B200). **Do NOT confuse `B200` (`a4-highgpu-8g`) with `GB200` (`a4x-highgpu-4g`) or `GB300` (`a4x-maxgpu-4g-metal`)!**
+   - **GB200 (NVIDIA GB200, A4X family)**: `a4x-highgpu-4g` (4x GB200).
+   - **GB300 (NVIDIA GB300, A4X Max bare metal)**: `a4x-maxgpu-4g-metal` (4x GB300).
+   - **H200 (NVIDIA H200, A3 Ultra)**: `a3-ultragpu-8g` (8x H200).
+   - **H100 (NVIDIA H100 80GB, A3 family)**: `a3-highgpu-8g` (default 8x H100), `a3-highgpu-4g`, `a3-highgpu-2g`, `a3-highgpu-1g`, `a3-megagpu-8g` (A3 Mega), `a3-edgegpu-8g` (A3 Edge).
+   - **RTX PRO 6000 (G4 family)**: `g4-standard-48` (1x), `g4-standard-96` (2x), `g4-standard-192` (4x), `g4-standard-384` (8x).
+   - **L4 (NVIDIA L4, G2 family)**: `g2-standard-4` (1x, default), `g2-standard-8`, `g2-standard-12`, `g2-standard-16`, `g2-standard-24` (2x), `g2-standard-32`, `g2-standard-48` (4x), `g2-standard-96` (8x).
+   - **A100 80GB (A2 Ultra)**: `a2-ultragpu-1g`, `a2-ultragpu-2g`, `a2-ultragpu-4g`, `a2-ultragpu-8g`.
+   - **A100 40GB (A2 Standard/Mega)**: `a2-highgpu-1g`, `a2-highgpu-2g`, `a2-highgpu-4g`, `a2-highgpu-8g`, `a2-megagpu-16g`.
+   - **T4 (NVIDIA T4, N1 family)**: `n1-standard-4 (1x T4)`, `n1-standard-8 (1x T4)`, `n1-standard-16 (2x T4)`, `n1-standard-32 (4x T4)`.
+   - **TPU v6e (Trillium)**: `ct6e-standard-1t`, `ct6e-standard-4t`, `ct6e-standard-8t`.
+   - **TPU v5p**: `ct5p-hightpu-1t`, `ct5p-hightpu-2t`, `ct5p-hightpu-4t`.
+   - **TPU v5e**: `ct5e-hightpu-1t`, `ct5e-hightpu-4t`, `ct5e-hightpu-8t`.
+   - **TPU v7x (Ironwood)**: `tpu7x-standard-4t`.
+4. **Run the advisories proactively** when the user asks to find capacity (especially "find any kind of <chip>" or "I don't care what region or when"):
+   - Run **all supported advisories** (DWS Calendar, Spot VM, and DWS Flex Start) right away rather than just setting dropdowns or asking unnecessary questions when defaults (e.g. `vm_count=1`, `duration_days=7`, all supported regions) work.
+   - Summarize results clearly (which zones have capacity, windows, preemption scores, estimated waits) and also check or mention project quotas if relevant. For DWS Flex, note it is Preview/whitelisted; if you get `The service is not available for this project.`, explain the project needs allow-listing.
 5. **For deploy:** build the priority strategy from the conversation, show the
    plan, and **require explicit user confirmation**. Only then run `deploy`
    with `--yes`. Without `--yes`, the CLI returns `requiresConfirmation: true`

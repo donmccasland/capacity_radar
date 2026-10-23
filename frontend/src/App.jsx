@@ -81,7 +81,14 @@ export default function App() {
       setTab(action.tab)
     }
     if (action.type === 'update_advisory') {
-      setAdvisoryPreset({ ...action, _ts: Date.now() })
+      setAdvisoryPreset((prev) => {
+        const sameMachine = prev && prev.machineType === action.machineType
+        return {
+          ...(sameMachine ? prev : {}),
+          ...action,
+          _ts: Date.now(),
+        }
+      })
     } else if (action.type === 'configure_scan' && action.deployPreset) {
       setDeployPreset({ ...action.deployPreset, _ts: Date.now() })
     } else if (action.type === 'filter_quotas') {
